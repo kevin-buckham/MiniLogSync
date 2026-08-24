@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  STMicroelectronics VIDs used by STM32 USB CDC devices (rusEFI runs on STM32).
+  If the ECU enumerates under a different VID the auto-launch simply will not
+  fire; the app still finds it manually via the CDC interface-class scan in
+  EcuLink.findDevice().
+-->
+<resources>
+    <usb-device vendor-id="1155" />   <!-- 0x0483 STMicroelectronics -->
+    <usb-device vendor-id="1003" />   <!-- 0x03EB Atmel/ex-STM CDC clones -->
+</resources>

@@ -1,0 +1,13 @@
+<resources>
+    <string name="app_name">MiniLogSync</string>
+    <string name="status_no_device">No ECU detected</string>
+    <string name="status_disconnected">Not connected</string>
+    <string name="status_connected">Connected - ECU is logging</string>
+    <string name="status_mounted">Card mounted to phone</string>
+    <string name="warn_not_logging">ECU IS NOT LOGGING while the card is mounted. Tap \"Return to ECU\" when done copying.</string>
+    <string name="btn_connect">Connect</string>
+    <string name="btn_mount">Mount card to phone</string>
+    <string name="btn_restore">Return to ECU (auto)</string>
+    <string name="btn_restore_ecu">Force ECU logging</string>
+    <string name="hint">Copy logs in the Files app while mounted, then return the card to the ECU.</string>
+</resources>
