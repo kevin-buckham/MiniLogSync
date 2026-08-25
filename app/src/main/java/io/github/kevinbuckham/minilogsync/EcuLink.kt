@@ -118,12 +118,19 @@ class EcuLink(private val context: Context) {
             val packet = TsPacket.execute(command)
             p.write(packet, WRITE_TIMEOUT_MS)
 
+            // usb-serial-for-android's read() is read(dest, timeoutMs) - no offset/length
+            // overload - so accumulate through a scratch chunk.
             val buf = ByteArray(64)
+            val chunk = ByteArray(64)
             var total = 0
             val deadline = System.currentTimeMillis() + READ_TIMEOUT_MS
             while (total < TsPacket.MIN_REPLY && System.currentTimeMillis() < deadline) {
-                val n = p.read(buf, total, buf.size - total, 250)
-                if (n > 0) total += n
+                val n = p.read(chunk, 250)
+                if (n > 0) {
+                    val take = minOf(n, buf.size - total)
+                    chunk.copyInto(buf, total, 0, take)
+                    total += take
+                }
             }
 
             val raw = TsPacket.hex(buf, total)
