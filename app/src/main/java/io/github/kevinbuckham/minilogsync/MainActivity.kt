@@ -4,11 +4,14 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.SharedPreferences
 import android.hardware.usb.UsbManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.widget.Button
 import android.widget.TextView
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -25,6 +28,8 @@ import java.util.concurrent.Executors
 class MainActivity : AppCompatActivity() {
 
     private lateinit var link: EcuLink
+    private lateinit var history: SyncHistory
+    private lateinit var prefs: SharedPreferences
     private lateinit var statusView: TextView
     private lateinit var logView: TextView
     private lateinit var warnView: TextView
@@ -66,6 +71,8 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         link = EcuLink(this)
+        history = SyncHistory(this)
+        prefs = getSharedPreferences("app", Context.MODE_PRIVATE)
         statusView = findViewById(R.id.status)
         logView = findViewById(R.id.log)
         warnView = findViewById(R.id.warning)
@@ -97,6 +104,15 @@ class MainActivity : AppCompatActivity() {
                     log("Card explicitly assigned to ECU logging.")
                 }
             }
+        }
+
+        findViewById<Button>(R.id.btnDest).setOnClickListener { pickDestination.launch(null) }
+
+        findViewById<Button>(R.id.btnSync).setOnClickListener { startSync() }
+
+        findViewById<Button>(R.id.btnForget).setOnClickListener {
+            history.forgetAll()
+            log("Sync history cleared - the next sync re-copies everything")
         }
 
         val filter = IntentFilter().apply {
@@ -154,6 +170,39 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 log(r.message + if (r.raw.isNotEmpty()) "   [${r.raw}]" else "")
                 onDone(r.ok)
+                refresh()
+            }
+        }
+    }
+
+    private val pickDestination =
+        registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            if (uri == null) return@registerForActivityResult
+            contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+            prefs.edit().putString("dest", uri.toString()).apply()
+            log("Destination set: ${uri.lastPathSegment}")
+        }
+
+    private fun destinationUri(): Uri? =
+        prefs.getString("dest", null)?.let(Uri::parse)
+
+    private fun startSync() {
+        if (!link.isOpen) { log("Not connected - tap Connect first"); return }
+        val dest = destinationUri()
+        if (dest == null) { log("Pick a destination folder first"); return }
+
+        mountedToPhone = true
+        refresh()
+        log("=== Sync started ===")
+        io.execute {
+            val job = SyncJob(this, link, history)
+            val ok = job.run(dest) { line -> runOnUiThread { log(line) } }
+            runOnUiThread {
+                mountedToPhone = false
+                log(if (ok) "=== Sync complete ===" else "=== Sync finished with problems ===")
                 refresh()
             }
         }
