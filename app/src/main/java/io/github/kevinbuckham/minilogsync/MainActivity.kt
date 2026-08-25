@@ -145,7 +145,7 @@ class MainActivity : AppCompatActivity() {
             registerReceiver(usbReceiver, filter)
         }
 
-        log("MiniLogSync ready")
+        log("MiniLogSync ${appVersion()} ready")
         refresh()
         connect()
     }
@@ -227,6 +227,10 @@ class MainActivity : AppCompatActivity() {
         return if (leaf != null) "$leaf  ($provider)" else provider
     }
 
+    private fun appVersion(): String = try {
+        packageManager.getPackageInfo(packageName, 0).versionName ?: "?"
+    } catch (e: Exception) { "?" }
+
     private fun destinationUri(): Uri? =
         prefs.getString("dest", null)?.let(Uri::parse)
 
@@ -303,11 +307,12 @@ class MainActivity : AppCompatActivity() {
             ?: getString(R.string.dest_unset)
         findViewById<Button>(R.id.btnSync).text =
             getString(if (runningJob != null) R.string.btn_cancel else R.string.btn_sync)
-        statusView.text = when {
+        val state = when {
             !link.isOpen -> getString(R.string.status_disconnected)
             mountedToPhone -> getString(R.string.status_mounted)
             else -> getString(R.string.status_connected)
         }
+        statusView.text = "$state\nbuild ${appVersion()}"
         warnView.text = if (mountedToPhone) getString(R.string.warn_not_logging) else ""
     }
 

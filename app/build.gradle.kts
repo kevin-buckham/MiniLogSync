@@ -3,6 +3,11 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// Build identity comes from CI (-PbuildLabel / -PbuildCode) so every APK is
+// distinguishable in Downloads and inside the app itself.
+val buildLabel = (project.findProperty("buildLabel") as String?) ?: "local-dev"
+val buildCode = (project.findProperty("buildCode") as String?)?.toIntOrNull() ?: 1
+
 android {
     namespace = "io.github.kevinbuckham.minilogsync"
     compileSdk = 34
@@ -11,8 +16,8 @@ android {
         applicationId = "io.github.kevinbuckham.minilogsync"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1-v1"
+        versionCode = buildCode
+        versionName = buildLabel
     }
 
     // A FIXED debug key, committed to the repo. Without this every CI run

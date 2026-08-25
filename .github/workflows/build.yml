@@ -19,13 +19,29 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      - name: Build identity
+        id: info
+        run: |
+          echo "label=$(date -u +%Y%m%d-%H%M)-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "code=$(( $(date -u +%s) / 60 ))" >> "$GITHUB_OUTPUT"
+
       # No gradle wrapper committed (cannot generate the wrapper jar offline);
       # the setup-gradle action provides the gradle CLI.
       - name: Build debug APK
-        run: gradle assembleDebug --no-daemon --stacktrace
+        run: |
+          gradle assembleDebug --no-daemon --stacktrace \
+            -PbuildLabel=${{ steps.info.outputs.label }} \
+            -PbuildCode=${{ steps.info.outputs.code }}
+
+      - name: Name the APK
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/debug/app-debug.apk \
+             "out/MiniLogSync-${{ steps.info.outputs.label }}.apk"
+          ls -la out
 
       - uses: actions/upload-artifact@v4
         with:
-          name: MiniLogSync-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          name: MiniLogSync-${{ steps.info.outputs.label }}
+          path: out/*.apk
           if-no-files-found: error
