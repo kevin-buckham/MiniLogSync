@@ -159,8 +159,9 @@ class SyncJob(
             var lastUi = 0L
             var soFar = 0L
 
+            var records = -1
             val written = context.contentResolver.openOutputStream(tmp.uri)!!.use { os ->
-                card.copyTo(f, os, ::active) { chunk, len ->
+                val (bytes, recs) = card.copyTrimmed(f, os, ::active) { chunk, len ->
                     sourceCrc.update(chunk, 0, len)
                     soFar += len
                     val now = System.currentTimeMillis()
@@ -179,21 +180,31 @@ class SyncJob(
                         )
                     }
                 }
+                records = recs
+                bytes
             }
 
             if (!active()) { tmp.delete(); return FileResult.CANCELLED }
 
-            if (written != size) {
+            // A trimmed .mlg is legitimately shorter than the card copy: the ECU
+            // pre-allocates 32 MB and never truncates. Only an UNtrimmed file must
+            // match the card length exactly.
+            if (records < 0 && written != size) {
                 log("  SIZE MISMATCH $name: got $written of $size - not recording")
                 tmp.delete()
                 return FileResult.FAILED
+            }
+            if (records >= 0) {
+                val saved = 100 - (written * 100 / maxOf(size, 1))
+                log("  trimmed padding: ${fmtMb(size)} -> ${fmtMb(written)} " +
+                    "($records records, $saved% less to transfer)")
             }
 
             // BLOCKER fix: closing a SAF stream does not mean the bytes are
             // durable - cloud providers buffer and can fail the upload later.
             // Read the destination back and verify before trusting it.
-            progress("File $index/$count  verifying ${fmtMb(size)}...\n$name")
-            val readBack = verifyDestination(tmp, size, sourceCrc.value)
+            progress("File $index/$count  verifying ${fmtMb(written)}...\n$name")
+            val readBack = verifyDestination(tmp, written, sourceCrc.value)
             if (readBack != null) {
                 log("  VERIFY FAILED $name: $readBack - not recording")
                 tmp.delete()
@@ -206,6 +217,8 @@ class SyncJob(
                 return FileResult.FAILED
             }
 
+            // Key on the CARD's size, not the trimmed size, so the next sync still
+            // recognises this file on the card.
             history.markCopied(name, size)
             FileResult.COPIED
         } catch (e: Exception) {

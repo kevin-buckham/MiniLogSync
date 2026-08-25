@@ -105,6 +105,137 @@ class CardReader(private val context: Context) {
         return copied
     }
 
+    /**
+     * Copy an .mlg, stopping at the end of the real data instead of dragging the
+     * 32 MB of pre-allocation padding across a slow link.
+     *
+     * Falls back to a plain full copy whenever anything is unexpected (not an
+     * MLG, odd header, short read) - the padding is only wasted time, whereas
+     * dropping real data would be a silent loss.
+     *
+     * @return Pair(bytesWritten, recordsKept) - recordsKept is -1 if not trimmed.
+     */
+    fun copyTrimmed(
+        file: UsbFile,
+        out: OutputStream,
+        keepGoing: () -> Boolean,
+        onChunk: (ByteArray, Int) -> Unit
+    ): Pair<Long, Int> {
+        UsbFileInputStream(file).use { stream ->
+            // --- header ---
+            val probe = ByteArray(MlgTrim.PROBE_BYTES)
+            val got = readFully(stream, probe, probe.size)
+            if (got < probe.size) {
+                emit(out, probe, got, onChunk)
+                return Pair(got.toLong(), -1)
+            }
+            val header = MlgTrim.parseHeader(probe, got)
+                ?: run {   // not an MLG: copy the rest verbatim
+                    emit(out, probe, got, onChunk)
+                    return Pair(got + drainRest(stream, out, keepGoing, onChunk), -1)
+                }
+
+            emit(out, probe, got, onChunk)
+            var written = got.toLong()
+
+            // rest of the header block, verbatim
+            var remainingHeader = header.dataBegin - got
+            val hbuf = ByteArray(64 * 1024)
+            while (remainingHeader > 0) {
+                if (!keepGoing()) return Pair(written, -1)
+                val want = minOf(remainingHeader, hbuf.size)
+                val n = readFully(stream, hbuf, want)
+                if (n <= 0) return Pair(written, -1)
+                emit(out, hbuf, n, onChunk)
+                written += n
+                remainingHeader -= n
+            }
+
+            // --- data blocks ---
+            var pending = ByteArray(0)
+            var prevCounter: Int? = null
+            var records = 0
+            val chunk = ByteArray(256 * 1024)
+
+            while (keepGoing()) {
+                val n = readFully(stream, chunk, chunk.size)
+                val buf = if (pending.isEmpty() && n == chunk.size) chunk
+                          else pending + chunk.copyOf(maxOf(n, 0))
+                val avail = if (pending.isEmpty() && n == chunk.size) n else pending.size + maxOf(n, 0)
+
+                var off = 0
+                var stop = false
+                while (off + header.stride <= avail) {
+                    when (MlgTrim.classify(buf, off, prevCounter)) {
+                        MlgTrim.Verdict.MARKER -> {
+                            if (off + MlgTrim.MARKER_SIZE > avail) break
+                            off += MlgTrim.MARKER_SIZE
+                        }
+                        MlgTrim.Verdict.STOP -> { stop = true; break }
+                        MlgTrim.Verdict.DATA -> {
+                            prevCounter = MlgTrim.counterOf(buf, off)
+                            records++
+                            off += header.stride
+                        }
+                    }
+                }
+
+                if (off > 0) { emit(out, buf, off, onChunk); written += off }
+                if (stop) { out.flush(); return Pair(written, records) }
+                if (n <= 0) break                      // end of file
+                pending = buf.copyOfRange(off, avail)  // partial block carried over
+            }
+
+            out.flush()
+            return Pair(written, records)
+        }
+    }
+
+    private fun emit(out: OutputStream, b: ByteArray, len: Int, onChunk: (ByteArray, Int) -> Unit) {
+        if (len <= 0) return
+        out.write(b, 0, len)
+        onChunk(b, len)
+    }
+
+    /** Reads until [want] bytes or EOF, retrying transient failures. */
+    private fun readFully(stream: java.io.InputStream, buf: ByteArray, want: Int): Int {
+        var total = 0
+        while (total < want) {
+            var n = -1
+            var attempt = 0
+            while (attempt < 5) {
+                n = try { stream.read(buf, total, want - total) } catch (e: Exception) {
+                    if (attempt == 4) throw e
+                    -1
+                }
+                if (n >= 0) break
+                attempt++
+                Thread.sleep(50L * attempt)
+            }
+            if (n <= 0) break
+            total += n
+        }
+        return total
+    }
+
+    private fun drainRest(
+        stream: java.io.InputStream,
+        out: OutputStream,
+        keepGoing: () -> Boolean,
+        onChunk: (ByteArray, Int) -> Unit
+    ): Long {
+        val buf = ByteArray(64 * 1024)
+        var copied = 0L
+        while (keepGoing()) {
+            val n = readFully(stream, buf, buf.size)
+            if (n <= 0) break
+            emit(out, buf, n, onChunk)
+            copied += n
+        }
+        out.flush()
+        return copied
+    }
+
     fun close() {
         runCatching { device?.close() }
         device = null
