@@ -108,23 +108,42 @@ class EcuLink(private val context: Context) {
     }
 
     /**
-     * Send one console command and wait for the ECU's reply.
-     * Returns a Result describing the outcome for the UI log.
+     * Send one console command and wait for a CRC-VERIFIED reply, retrying on
+     * failure. The link is flaky (this ECU drops ~1 in 3 mass-storage commands)
+     * and the firmware also writes asynchronous console text to the same stream,
+     * so: drain stale bytes first, read the WHOLE declared frame, and verify the
+     * CRC before believing anything.
      */
-    fun sendCommand(command: String): Result {
+    fun sendCommand(command: String, attempts: Int = 3): Result {
+        var last = Result(false, "Not connected", "")
+        for (attempt in 1..attempts) {
+            last = sendOnce(command)
+            if (last.ok) return if (attempt == 1) last
+                else last.copy(message = last.message + " (attempt $attempt)")
+            if (attempt < attempts) Thread.sleep(300L * attempt)
+        }
+        return last.copy(message = last.message + " after $attempts attempts")
+    }
+
+    private fun sendOnce(command: String): Result {
         val p = port ?: return Result(false, "Not connected", "")
 
         return try {
-            val packet = TsPacket.execute(command)
-            p.write(packet, WRITE_TIMEOUT_MS)
+            // Discard anything already sitting in the buffer (async console
+            // output, or the tail of a previous reply) so it cannot be misread
+            // as the answer to THIS command.
+            drain(p)
 
-            // usb-serial-for-android's read() is read(dest, timeoutMs) - no offset/length
-            // overload - so accumulate through a scratch chunk.
-            val buf = ByteArray(64)
-            val chunk = ByteArray(64)
+            p.write(TsPacket.execute(command), WRITE_TIMEOUT_MS)
+
+            val buf = ByteArray(256)
+            val chunk = ByteArray(256)
             var total = 0
             val deadline = System.currentTimeMillis() + READ_TIMEOUT_MS
-            while (total < TsPacket.MIN_REPLY && System.currentTimeMillis() < deadline) {
+
+            while (System.currentTimeMillis() < deadline) {
+                val want = TsPacket.declaredFrameSize(buf, total)
+                if (want in 1..total) break          // whole frame present
                 val n = p.read(chunk, 250)
                 if (n > 0) {
                     val take = minOf(n, buf.size - total)
@@ -134,13 +153,27 @@ class EcuLink(private val context: Context) {
             }
 
             val raw = TsPacket.hex(buf, total)
-            when (val code = TsPacket.responseCode(buf, total)) {
+            when (val reply = TsPacket.parseReply(buf, total)) {
                 null -> Result(false, "No/short reply to '$command'", raw)
-                TsPacket.RESPONSE_OK -> Result(true, "OK: $command", raw)
-                else -> Result(false, "ECU replied 0x%02X to '%s'".format(code, command), raw)
+                else -> when {
+                    !reply.crcOk ->
+                        Result(false, "BAD CRC in reply to '$command'", raw)
+                    reply.code == TsPacket.RESPONSE_OK ->
+                        Result(true, "OK: $command", raw)
+                    else ->
+                        Result(false, "ECU replied 0x%02X to '%s'".format(reply.code, command), raw)
+                }
             }
         } catch (e: Exception) {
             Result(false, "Send failed: ${e.message}", "")
+        }
+    }
+
+    private fun drain(p: UsbSerialPort) {
+        val scratch = ByteArray(256)
+        repeat(4) {
+            val n = try { p.read(scratch, 50) } catch (_: Exception) { 0 }
+            if (n <= 0) return
         }
     }
 

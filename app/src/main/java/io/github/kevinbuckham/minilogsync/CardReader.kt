@@ -23,7 +23,7 @@ class CardReader(private val context: Context) {
     private var root: UsbFile? = null
 
     /** Opens the card. Returns null on success, or a human-readable error. */
-    fun open(): String? {
+    fun open(log: (String) -> Unit = {}): String? {
         close()
 
         val devices = UsbMassStorageDevice.getMassStorageDevices(context)
@@ -33,6 +33,9 @@ class CardReader(private val context: Context) {
             try {
                 dev.init()
             } catch (e: Exception) {
+                // Do NOT swallow this silently: if probing the ECU's USB stack
+                // ever upsets it, this message is the only trail we would have.
+                log("  storage init failed: ${e.message}")
                 continue
             }
 
@@ -71,17 +74,31 @@ class CardReader(private val context: Context) {
         file: UsbFile,
         out: OutputStream,
         keepGoing: () -> Boolean,
-        onProgress: (Long) -> Unit
+        onChunk: (ByteArray, Int) -> Unit
     ): Long {
         val buf = ByteArray(64 * 1024)
         var copied = 0L
         UsbFileInputStream(file).use { stream ->
             while (keepGoing()) {
-                val n = stream.read(buf)
+                // This ECU drops roughly one mass-storage command in three, so a
+                // single failed read must not be mistaken for end-of-file.
+                var n = -1
+                var attempt = 0
+                while (attempt < 5) {
+                    n = try {
+                        stream.read(buf)
+                    } catch (e: Exception) {
+                        if (attempt == 4) throw e
+                        -1
+                    }
+                    if (n >= 0) break
+                    attempt++
+                    Thread.sleep(50L * attempt)
+                }
                 if (n <= 0) break
                 out.write(buf, 0, n)
+                onChunk(buf, n)
                 copied += n
-                onProgress(copied)
             }
         }
         out.flush()

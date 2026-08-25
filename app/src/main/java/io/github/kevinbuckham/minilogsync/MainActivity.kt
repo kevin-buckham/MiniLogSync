@@ -88,6 +88,7 @@ class MainActivity : AppCompatActivity() {
             send(EcuLink.CMD_MOUNT_PHONE) { ok ->
                 if (ok) {
                     mountedToPhone = true
+                    setMountedFlag(true)
                     log("Card handed to phone. Open Files to copy logs.")
                 }
             }
@@ -97,7 +98,8 @@ class MainActivity : AppCompatActivity() {
             send(EcuLink.CMD_RESTORE_AUTO) { ok ->
                 if (ok) {
                     mountedToPhone = false
-                    log("Card returned to ECU - logging should resume.")
+                    setMountedFlag(false)
+                    log("Card returned to ECU - logging resumed.")
                 }
             }
         }
@@ -106,6 +108,7 @@ class MainActivity : AppCompatActivity() {
             send(EcuLink.CMD_RESTORE_ECU) { ok ->
                 if (ok) {
                     mountedToPhone = false
+                    setMountedFlag(false)
                     log("Card explicitly assigned to ECU logging.")
                 }
             }
@@ -169,6 +172,7 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 log(msg)
                 refresh()
+                if (link.isOpen) healIfLeftMounted()
             }
         }
     }
@@ -224,6 +228,33 @@ class MainActivity : AppCompatActivity() {
     private fun destinationUri(): Uri? =
         prefs.getString("dest", null)?.let(Uri::parse)
 
+    /** Survives process death so a crashed/killed sync can be healed next launch. */
+    private fun setMountedFlag(mounted: Boolean) =
+        prefs.edit().putBoolean("left_mounted", mounted).apply()
+
+    /**
+     * If a previous session ended without confirming the ECU had its card back
+     * (crash, process kill, battery death, cable yank), put it right now.
+     */
+    private fun healIfLeftMounted() {
+        if (!prefs.getBoolean("left_mounted", false)) return
+        log("Previous session may have left the ECU not logging - restoring...")
+        io.execute {
+            val r = link.sendCommand(EcuLink.CMD_RESTORE_AUTO, attempts = 3)
+            runOnUiThread {
+                if (r.ok) {
+                    setMountedFlag(false)
+                    mountedToPhone = false
+                    log("Recovered: ECU logging restored")
+                } else {
+                    mountedToPhone = true
+                    log("Could not restore logging (${r.message}) - tap 'Force ECU logging'")
+                }
+                refresh()
+            }
+        }
+    }
+
     private fun startSync() {
         if (!link.isOpen) { log("Not connected - tap Connect first"); return }
         val dest = destinationUri()
@@ -234,16 +265,22 @@ class MainActivity : AppCompatActivity() {
         mountedToPhone = true
         refresh()
         log("=== Sync started ===")
+        setMountedFlag(true)
         io.execute {
-            val ok = job.run(dest) { line -> runOnUiThread { log(line) } }
+            val outcome = job.run(dest) { line -> runOnUiThread { log(line) } }
             runOnUiThread {
                 runningJob = null
-                mountedToPhone = false
+                // Only clear the "not logging" state if the ECU actually confirmed
+                // it took the card back. Never tell the owner it is safe to drive
+                // away on an assumption - that is how a whole drive goes unlogged.
+                mountedToPhone = !outcome.restored
+                setMountedFlag(!outcome.restored)
                 log(
                     when {
-                        job.cancelled.get() -> "=== Sync cancelled (safe to unplug) ==="
-                        ok -> "=== Sync complete ==="
-                        else -> "=== Sync finished with problems ==="
+                        !outcome.restored -> "=== FINISHED, BUT ECU LOGGING NOT CONFIRMED - see warning above ==="
+                        outcome.cancelled -> "=== Sync cancelled; logging resumed, safe to unplug ==="
+                        outcome.clean -> "=== Sync complete; logging resumed ==="
+                        else -> "=== Sync finished with problems; logging resumed ==="
                     }
                 )
                 refresh()
