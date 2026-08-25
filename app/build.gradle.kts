@@ -15,7 +15,24 @@ android {
         versionName = "0.1-v1"
     }
 
+    // A FIXED debug key, committed to the repo. Without this every CI run
+    // generates its own throwaway debug keystore, so each APK is signed with a
+    // different key and Android refuses to update in place ("App not installed")
+    // - which would wipe the sync history and destination on every update.
+    // This is a debug key for a personal tool: it protects nothing.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = rootProject.file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("debug")
+        }
         release {
             isMinifyEnabled = false
         }
