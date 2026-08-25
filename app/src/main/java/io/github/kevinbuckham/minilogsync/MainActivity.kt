@@ -34,6 +34,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var logView: TextView
     private lateinit var warnView: TextView
     private lateinit var destView: TextView
+    private lateinit var progressView: TextView
 
     private val io = Executors.newSingleThreadExecutor()
     private val stamp = SimpleDateFormat("HH:mm:ss", Locale.US)
@@ -81,6 +82,7 @@ class MainActivity : AppCompatActivity() {
         logView = findViewById(R.id.log)
         warnView = findViewById(R.id.warning)
         destView = findViewById(R.id.dest)
+        progressView = findViewById(R.id.progress)
 
         findViewById<Button>(R.id.btnConnect).setOnClickListener { connect() }
 
@@ -264,12 +266,20 @@ class MainActivity : AppCompatActivity() {
         runningJob = job
         mountedToPhone = true
         refresh()
+        // A big sync takes minutes; do not let the screen sleep mid-transfer.
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         log("=== Sync started ===")
         setMountedFlag(true)
         io.execute {
-            val outcome = job.run(dest) { line -> runOnUiThread { log(line) } }
+            val outcome = job.run(
+                dest,
+                log = { line -> runOnUiThread { log(line) } },
+                progress = { text -> runOnUiThread { progressView.text = text } }
+            )
             runOnUiThread {
                 runningJob = null
+                progressView.text = ""
+                window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 // Only clear the "not logging" state if the ECU actually confirmed
                 // it took the card back. Never tell the owner it is safe to drive
                 // away on an assumption - that is how a whole drive goes unlogged.

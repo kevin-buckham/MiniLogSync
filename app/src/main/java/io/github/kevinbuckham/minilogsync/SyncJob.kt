@@ -45,7 +45,7 @@ class SyncJob(
         val clean: Boolean get() = failed == 0 && !cancelled && restored
     }
 
-    fun run(destTree: Uri, log: (String) -> Unit): Outcome {
+    fun run(destTree: Uri, log: (String) -> Unit, progress: (String) -> Unit = {}): Outcome {
         var copied = 0
         var skipped = 0
         var failed = 0
@@ -72,13 +72,21 @@ class SyncJob(
                 val files = card.listFiles().sortedBy { it.name }
                 log("Card has ${files.size} files")
 
+                val todo = files.filter { !history.isCopied(it.name, it.length) }
+                val totalBytes = todo.sumOf { it.length }
+                log("${todo.size} new file(s), ${fmtMb(totalBytes)} to copy")
+                var doneBytes = 0L
+                var index = 0
+
                 for (f in files) {
                     if (!active()) {
                         log("Cancelled - $copied file(s) saved; the rest will copy next time")
                         break
                     }
-                    when (copyOne(card, f, dest, log)) {
-                        FileResult.COPIED -> copied++
+                    val isNew = !history.isCopied(f.name, f.length)
+                    if (isNew) index++
+                    when (copyOne(card, f, dest, log, index, todo.size, doneBytes, totalBytes, progress)) {
+                        FileResult.COPIED -> { copied++; doneBytes += f.length }
                         FileResult.SKIPPED -> skipped++
                         FileResult.FAILED -> failed++
                         FileResult.CANCELLED -> {
@@ -88,6 +96,7 @@ class SyncJob(
                     if (!active()) break
                 }
 
+                progress("")
                 if (active()) log("Done: $copied new, $skipped already had, $failed failed")
             }
         } catch (e: Exception) {
@@ -123,7 +132,12 @@ class SyncJob(
         card: CardReader,
         f: me.jahnen.libaums.core.fs.UsbFile,
         dest: DocumentFile,
-        log: (String) -> Unit
+        log: (String) -> Unit,
+        index: Int,
+        count: Int,
+        bytesBefore: Long,
+        bytesTotal: Long,
+        progress: (String) -> Unit
     ): FileResult {
         val name = f.name
         val size = f.length
@@ -138,11 +152,33 @@ class SyncJob(
             val tmp = dest.createFile("application/octet-stream", tmpName)
                 ?: run { log("Could not create $tmpName"); return FileResult.FAILED }
 
-            log("Copying $name (${size / 1024} kB)...")
+            log("Copying $name (${fmtMb(size)})...")
 
             val sourceCrc = CRC32()
+            val started = System.currentTimeMillis()
+            var lastUi = 0L
+            var soFar = 0L
+
             val written = context.contentResolver.openOutputStream(tmp.uri)!!.use { os ->
-                card.copyTo(f, os, ::active) { chunk, len -> sourceCrc.update(chunk, 0, len) }
+                card.copyTo(f, os, ::active) { chunk, len ->
+                    sourceCrc.update(chunk, 0, len)
+                    soFar += len
+                    val now = System.currentTimeMillis()
+                    if (now - lastUi > 250) {          // ~4 updates/sec, not per 64 kB
+                        lastUi = now
+                        val secs = (now - started) / 1000.0
+                        val rate = if (secs > 0.3) soFar / secs else 0.0
+                        val pct = if (size > 0) (soFar * 100 / size) else 0
+                        val overall = if (bytesTotal > 0)
+                            ((bytesBefore + soFar) * 100 / bytesTotal) else 0
+                        progress(
+                            "File $index/$count  $pct%  ${fmtMb(soFar)}/${fmtMb(size)}" +
+                                "   ${fmtRate(rate)}\n" +
+                                "Overall $overall%   ${etaText(bytesTotal - bytesBefore - soFar, rate)}\n" +
+                                name
+                        )
+                    }
+                }
             }
 
             if (!active()) { tmp.delete(); return FileResult.CANCELLED }
@@ -156,6 +192,7 @@ class SyncJob(
             // BLOCKER fix: closing a SAF stream does not mean the bytes are
             // durable - cloud providers buffer and can fail the upload later.
             // Read the destination back and verify before trusting it.
+            progress("File $index/$count  verifying ${fmtMb(size)}...\n$name")
             val readBack = verifyDestination(tmp, size, sourceCrc.value)
             if (readBack != null) {
                 log("  VERIFY FAILED $name: $readBack - not recording")
@@ -176,6 +213,20 @@ class SyncJob(
             runCatching { dest.findFile("$name.part")?.delete() }
             FileResult.FAILED
         }
+    }
+
+    private fun fmtMb(bytes: Long): String =
+        if (bytes >= 1024 * 1024) "%.1f MB".format(bytes / 1048576.0)
+        else "%d kB".format(bytes / 1024)
+
+    private fun fmtRate(bytesPerSec: Double): String =
+        if (bytesPerSec <= 0) "" else "%.0f kB/s".format(bytesPerSec / 1024.0)
+
+    private fun etaText(bytesLeft: Long, rate: Double): String {
+        if (rate <= 0 || bytesLeft <= 0) return ""
+        val secs = (bytesLeft / rate).toInt()
+        return if (secs >= 60) "about ${secs / 60}m ${secs % 60}s left"
+        else "about ${secs}s left"
     }
 
     /** Re-reads the just-written file. Returns null if good, else a reason. */

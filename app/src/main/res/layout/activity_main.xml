@@ -34,6 +34,16 @@
             android:text="@string/btn_connect" />
 
         <TextView
+            android:id="@+id/progress"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingBottom="8dp"
+            android:fontFamily="monospace"
+            android:textSize="15sp"
+            android:textStyle="bold"
+            android:text="" />
+
+        <TextView
             android:id="@+id/dest"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
