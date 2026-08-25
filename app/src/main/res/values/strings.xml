@@ -10,6 +10,7 @@
     <string name="btn_restore">Return to ECU (auto)</string>
     <string name="btn_restore_ecu">Force ECU logging</string>
     <string name="hint">Copy logs in the Files app while mounted, then return the card to the ECU.</string>
+    <string name="dest_unset">No destination folder chosen yet</string>
     <string name="btn_dest">Choose destination folder</string>
     <string name="btn_sync">SYNC NEW LOGS</string>
     <string name="btn_cancel">CANCEL SYNC</string>

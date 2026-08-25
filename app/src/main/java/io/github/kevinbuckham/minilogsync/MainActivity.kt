@@ -33,6 +33,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusView: TextView
     private lateinit var logView: TextView
     private lateinit var warnView: TextView
+    private lateinit var destView: TextView
 
     private val io = Executors.newSingleThreadExecutor()
     private val stamp = SimpleDateFormat("HH:mm:ss", Locale.US)
@@ -79,6 +80,7 @@ class MainActivity : AppCompatActivity() {
         statusView = findViewById(R.id.status)
         logView = findViewById(R.id.log)
         warnView = findViewById(R.id.warning)
+        destView = findViewById(R.id.dest)
 
         findViewById<Button>(R.id.btnConnect).setOnClickListener { connect() }
 
@@ -139,6 +141,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         log("MiniLogSync ready")
+        refresh()
         connect()
     }
 
@@ -193,9 +196,30 @@ class MainActivity : AppCompatActivity() {
                 uri,
                 Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
             )
+            val previous = prefs.getString("dest", null)
             prefs.edit().putString("dest", uri.toString()).apply()
-            log("Destination set: ${uri.lastPathSegment}")
+            log("Destination set: ${prettyDest(uri)}")
+            if (previous != null && previous != uri.toString() && history.count > 0) {
+                // Sync history is global, not per-folder: files already copied
+                // elsewhere will NOT be copied again into the new folder.
+                log(
+                    "Note: ${history.count} file(s) are already marked synced, so only NEW " +
+                        "logs will land here. Tap 'Forget sync history' to backfill this folder."
+                )
+            }
+            refresh()
         }
+
+    /** Best-effort readable name for a SAF tree uri (provider + last path segment). */
+    private fun prettyDest(uri: Uri): String {
+        val leaf = uri.lastPathSegment?.substringAfterLast(':')?.ifBlank { null }
+        val provider = uri.authority
+            ?.removePrefix("com.android.")
+            ?.removeSuffix(".documents")
+            ?.removeSuffix(".storage.documents")
+            ?: "?"
+        return if (leaf != null) "$leaf  ($provider)" else provider
+    }
 
     private fun destinationUri(): Uri? =
         prefs.getString("dest", null)?.let(Uri::parse)
@@ -228,6 +252,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refresh() {
+        destView.text = destinationUri()?.let { "Saving to: ${prettyDest(it)}" }
+            ?: getString(R.string.dest_unset)
         findViewById<Button>(R.id.btnSync).text =
             getString(if (runningJob != null) R.string.btn_cancel else R.string.btn_sync)
         statusView.text = when {
