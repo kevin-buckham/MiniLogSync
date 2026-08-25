@@ -12,5 +12,6 @@
     <string name="hint">Copy logs in the Files app while mounted, then return the card to the ECU.</string>
     <string name="btn_dest">Choose destination folder</string>
     <string name="btn_sync">SYNC NEW LOGS</string>
+    <string name="btn_cancel">CANCEL SYNC</string>
     <string name="btn_forget">Forget sync history</string>
 </resources>

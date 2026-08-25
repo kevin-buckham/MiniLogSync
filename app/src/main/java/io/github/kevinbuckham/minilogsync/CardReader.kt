@@ -62,12 +62,21 @@ class CardReader(private val context: Context) {
     fun listFiles(): List<UsbFile> =
         root?.listFiles()?.filter { !it.isDirectory } ?: emptyList()
 
-    /** Streams one file out. Returns bytes copied. */
-    fun copyTo(file: UsbFile, out: OutputStream, onProgress: (Long) -> Unit): Long {
+    /**
+     * Streams one file out. Returns bytes copied.
+     * [keepGoing] is polled every chunk so a cancel takes effect mid-file
+     * instead of waiting for a 32 MB log to finish.
+     */
+    fun copyTo(
+        file: UsbFile,
+        out: OutputStream,
+        keepGoing: () -> Boolean,
+        onProgress: (Long) -> Unit
+    ): Long {
         val buf = ByteArray(64 * 1024)
         var copied = 0L
         UsbFileInputStream(file).use { stream ->
-            while (true) {
+            while (keepGoing()) {
                 val n = stream.read(buf)
                 if (n <= 0) break
                 out.write(buf, 0, n)

@@ -40,6 +40,9 @@ class MainActivity : AppCompatActivity() {
     /** True while the card is handed to the phone - the ECU is NOT logging. */
     private var mountedToPhone = false
 
+    /** Non-null while a sync is running; the Sync button becomes Cancel. */
+    private var runningJob: SyncJob? = null
+
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
@@ -108,7 +111,15 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.btnDest).setOnClickListener { pickDestination.launch(null) }
 
-        findViewById<Button>(R.id.btnSync).setOnClickListener { startSync() }
+        findViewById<Button>(R.id.btnSync).setOnClickListener {
+            val job = runningJob
+            if (job != null) {
+                job.cancel()
+                log("Cancelling after the current chunk...")
+            } else {
+                startSync()
+            }
+        }
 
         findViewById<Button>(R.id.btnForget).setOnClickListener {
             history.forgetAll()
@@ -194,21 +205,31 @@ class MainActivity : AppCompatActivity() {
         val dest = destinationUri()
         if (dest == null) { log("Pick a destination folder first"); return }
 
+        val job = SyncJob(this, link, history)
+        runningJob = job
         mountedToPhone = true
         refresh()
         log("=== Sync started ===")
         io.execute {
-            val job = SyncJob(this, link, history)
             val ok = job.run(dest) { line -> runOnUiThread { log(line) } }
             runOnUiThread {
+                runningJob = null
                 mountedToPhone = false
-                log(if (ok) "=== Sync complete ===" else "=== Sync finished with problems ===")
+                log(
+                    when {
+                        job.cancelled.get() -> "=== Sync cancelled (safe to unplug) ==="
+                        ok -> "=== Sync complete ==="
+                        else -> "=== Sync finished with problems ==="
+                    }
+                )
                 refresh()
             }
         }
     }
 
     private fun refresh() {
+        findViewById<Button>(R.id.btnSync).text =
+            getString(if (runningJob != null) R.string.btn_cancel else R.string.btn_sync)
         statusView.text = when {
             !link.isOpen -> getString(R.string.status_disconnected)
             mountedToPhone -> getString(R.string.status_mounted)

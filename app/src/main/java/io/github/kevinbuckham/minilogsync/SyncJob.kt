@@ -3,6 +3,7 @@ package io.github.kevinbuckham.minilogsync
 import android.content.Context
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * The whole one-button sync: mount -> read card -> copy new files -> restore.
@@ -18,7 +19,12 @@ class SyncJob(
     private val history: SyncHistory
 ) {
 
-    data class Progress(val line: String)
+    /** Set from the UI thread to stop after the current chunk. */
+    val cancelled = AtomicBoolean(false)
+
+    fun cancel() = cancelled.set(true)
+
+    private fun active() = !cancelled.get()
 
     fun run(destTree: Uri, log: (String) -> Unit): Boolean {
         val dest = DocumentFile.fromTreeUri(context, destTree)
@@ -40,6 +46,7 @@ class SyncJob(
         try {
             // The ECU needs a moment to attach the LUN before it will enumerate.
             Thread.sleep(1500)
+            if (!active()) return false
 
             val err = card.open()
             if (err != null) {
@@ -55,6 +62,10 @@ class SyncJob(
             var failed = 0
 
             for (f in files) {
+                if (!active()) {
+                    log("Cancelled - $copiedCount file(s) saved; the rest will copy next time")
+                    break
+                }
                 val name = f.name
                 val size = f.length
                 if (history.isCopied(name, size)) { skipped++; continue }
@@ -69,13 +80,21 @@ class SyncJob(
                 log("Copying $name (${size / 1024} kB)...")
                 val written = try {
                     context.contentResolver.openOutputStream(tmp.uri)!!.use { os ->
-                        card.copyTo(f, os) { }
+                        card.copyTo(f, os, ::active) { }
                     }
                 } catch (e: Exception) {
                     log("  FAILED $name: ${e.message}")
                     tmp.delete()
                     failed++
                     continue
+                }
+
+                if (!active()) {
+                    // Stopped mid-file: bin the partial, do not record it, so the
+                    // next sync starts this file cleanly.
+                    tmp.delete()
+                    log("Cancelled during $name - $copiedCount file(s) saved, this one will retry")
+                    break
                 }
 
                 if (written != size) {
@@ -96,8 +115,8 @@ class SyncJob(
                 copiedCount++
             }
 
-            log("Done: $copiedCount new, $skipped already had, $failed failed")
-            ok = failed == 0
+            if (active()) log("Done: $copiedCount new, $skipped already had, $failed failed")
+            ok = failed == 0 && active()
         } catch (e: Exception) {
             log("Sync error: ${e.message}")
         } finally {
