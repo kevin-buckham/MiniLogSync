@@ -27,6 +27,14 @@ import java.io.OutputStream
  */
 class CardReader(private val context: Context) {
 
+    private companion object {
+        /**
+         * Anything at least this big is the SD card, not the INI ramdisk.
+         * Measured on this ECU: ramdisk 1 MB, card 60905 MB.
+         */
+        const val MIN_CARD_MB = 100L
+    }
+
     private var comm: UsbCommunication? = null
     private var root: UsbFile? = null
 
@@ -79,12 +87,27 @@ class CardReader(private val context: Context) {
                         val fs = partition.fileSystem ?: continue
                         val r = fs.rootDirectory ?: continue
                         val names = runCatching { r.list().toList() }.getOrDefault(emptyList())
-                        val looksLikeCard = names.any {
+                        val label = runCatching { fs.volumeLabel }.getOrNull()?.trim().orEmpty()
+                        val capacityMb = block.blocks * block.blockSize / (1024L * 1024L)
+
+                        // Identify by CAPACITY first, not by contents. The INI ramdisk is
+                        // ~1 MB and the SD card is tens of GB, so size separates them
+                        // reliably - and unlike a filename test it still works on a
+                        // freshly formatted card, which is empty by definition.
+                        val hasLogs = names.any {
                             it.startsWith("re_") || it.endsWith(".mlg") ||
                                 it.contains("fail_") || it == "index.txt"
                         }
-                        log("  LUN $lun: ${names.size} entries" +
-                            if (looksLikeCard) " <- rusEFI log card" else " (not the log card)")
+                        val bigEnough = capacityMb >= MIN_CARD_MB
+                        val looksLikeCard = bigEnough || hasLogs
+
+                        log("  LUN $lun: ${names.size} entries, ${capacityMb} MB" +
+                            (if (label.isNotEmpty()) ", label '$label'" else "") +
+                            when {
+                                looksLikeCard && !hasLogs -> "  <- log card (empty - newly formatted?)"
+                                looksLikeCard -> "  <- rusEFI log card"
+                                else -> "  (too small to be the card - this is the INI ramdisk)"
+                            })
                         if (looksLikeCard) {
                             comm = c
                             root = r
