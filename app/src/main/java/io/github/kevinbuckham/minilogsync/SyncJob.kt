@@ -134,9 +134,11 @@ class SyncJob(
      */
     private fun openCardWithRetry(card: CardReader, log: (String) -> Unit): String? {
         var lastError: String? = null
-        for (attempt in 1..5) {
+        // Fewer, longer waits: each attempt re-claims the USB interface, and the
+        // ECU's USB stack is known to stall when a medium-less LUN is probed.
+        for (attempt in 1..3) {
             if (!active()) return "Cancelled before the card was opened"
-            Thread.sleep(if (attempt == 1) 1200 else 900)
+            Thread.sleep(if (attempt == 1) 2000 else 2500)
             lastError = card.open(log)
             if (lastError == null) return null
             log("Card not ready (attempt $attempt): $lastError")

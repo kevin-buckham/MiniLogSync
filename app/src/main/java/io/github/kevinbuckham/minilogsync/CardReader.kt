@@ -54,6 +54,7 @@ class CardReader(private val context: Context) {
                 continue
             }
 
+            var keepComm = false
             val maxLunBuf = ByteArray(1)
             val maxLun = try {
                 c.controlTransfer(161, 254, 0, iface.id, maxLunBuf, 1)
@@ -83,15 +84,20 @@ class CardReader(private val context: Context) {
                         if (looksLikeCard) {
                             comm = c
                             root = r
+                            keepComm = true
                             return null
                         }
                     }
                 } catch (e: Exception) {
-                    // Expected for LUN 0 (the INI ramdisk) and for empty slots.
-                    log("  LUN $lun skipped: ${e.javaClass.simpleName}")
+                    // Expected for LUN 0 (the INI ramdisk) and for empty slots -
+                    // but log enough to tell an expected skip from a real defect.
+                    val where = e.stackTrace.firstOrNull { it.className.contains("libaums") }
+                        ?.let { " at ${it.className.substringAfterLast('.')}.${it.methodName}" } ?: ""
+                    log("  LUN $lun skipped: ${e.javaClass.simpleName}: " +
+                        "${e.message ?: "(no message)"}$where")
                 }
             }
-            runCatching { c.close() }
+            if (!keepComm) runCatching { c.close() }
         }
 
         return "No volume containing rusEFI logs found (is the card mounted? tap Mount first)"
