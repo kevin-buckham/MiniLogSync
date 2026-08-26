@@ -1,15 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:padding="16dp">
+    android:orientation="vertical">
 
+    <!-- always-visible state, above the tabs -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="vertical">
+        android:orientation="vertical"
+        android:paddingLeft="16dp"
+        android:paddingRight="16dp"
+        android:paddingTop="16dp">
 
-        <!-- state -->
         <TextView
             android:id="@+id/status"
             android:layout_width="match_parent"
@@ -18,12 +21,11 @@
             android:textStyle="bold"
             android:text="@string/status_disconnected" />
 
-        <!-- loud, impossible to miss: the ECU is not logging -->
         <TextView
             android:id="@+id/warning"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:background="#8B0000"
+            android:background="@color/warn_bg"
             android:textColor="#FFFFFF"
             android:textSize="16sp"
             android:textStyle="bold"
@@ -31,130 +33,184 @@
             android:layout_marginTop="8dp"
             android:visibility="gone"
             android:text="@string/warn_not_logging" />
+    </LinearLayout>
 
-        <!-- live transfer progress -->
-        <TextView
-            android:id="@+id/progress"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:fontFamily="monospace"
-            android:textSize="15sp"
-            android:textStyle="bold"
-            android:visibility="gone"
-            android:text="" />
-
-        <!-- last outcome, kept visible after a sync -->
-        <TextView
-            android:id="@+id/summary"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:textSize="16sp"
-            android:visibility="gone"
-            android:text="" />
-
-        <!-- THE primary action -->
-        <Button
-            android:id="@+id/btnSync"
-            android:layout_width="match_parent"
-            android:layout_height="72dp"
-            android:layout_marginTop="16dp"
-            android:textSize="18sp"
-            android:textStyle="bold"
-            android:backgroundTint="@color/action_primary"
-            android:textColor="#FFFFFF"
-            android:text="@string/btn_sync" />
-
-        <!-- destination, secondary -->
-        <TextView
-            android:id="@+id/dest"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="14dp"
-            android:textSize="15sp"
-            android:text="@string/dest_unset" />
+    <!-- tab strip -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginTop="12dp"
+        android:paddingLeft="16dp"
+        android:paddingRight="16dp">
 
         <Button
-            android:id="@+id/btnDest"
-            android:backgroundTint="@color/action_neutral"
-            android:textColor="#FFFFFF"
-            android:layout_width="match_parent"
+            android:id="@+id/tabSync"
+            android:layout_width="0dp"
+            android:layout_weight="1"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="@string/btn_dest" />
+            android:text="@string/tab_sync" />
 
-        <!-- rarely needed, tucked away so they cannot be mis-tapped -->
         <Button
-            android:id="@+id/btnAdvanced"
-            android:backgroundTint="@color/action_neutral"
-            android:textColor="#FFFFFF"
-            android:layout_width="match_parent"
+            android:id="@+id/tabLog"
+            android:layout_width="0dp"
+            android:layout_weight="1"
             android:layout_height="wrap_content"
-            android:layout_marginTop="20dp"
-            android:text="@string/btn_advanced_show" />
+            android:layout_marginStart="8dp"
+            android:text="@string/tab_log" />
+    </LinearLayout>
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="2dp"
+        android:layout_marginTop="4dp"
+        android:background="#33FFFFFF" />
+
+    <!-- ===== SYNC TAB ===== -->
+    <ScrollView
+        android:id="@+id/pageSync"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:padding="16dp">
 
         <LinearLayout
-            android:id="@+id/advanced"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:visibility="gone">
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/summary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textSize="16sp"
+                android:visibility="gone"
+                android:text="" />
 
             <Button
-                android:id="@+id/btnConnect"
+                android:id="@+id/btnSync"
+                android:layout_width="match_parent"
+                android:layout_height="72dp"
+                android:layout_marginTop="12dp"
+                android:textSize="18sp"
+                android:textStyle="bold"
+                android:backgroundTint="@color/action_primary"
+                android:textColor="#FFFFFF"
+                android:text="@string/btn_sync" />
+
+            <TextView
+                android:id="@+id/dest"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:textSize="15sp"
+                android:text="@string/dest_unset" />
+
+            <Button
+                android:id="@+id/btnDest"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:backgroundTint="@color/action_neutral"
+                android:textColor="#FFFFFF"
+                android:text="@string/btn_dest" />
+
+            <Button
+                android:id="@+id/btnAdvanced"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="24dp"
+                android:backgroundTint="@color/action_neutral"
+                android:textColor="#FFFFFF"
+                android:text="@string/btn_advanced_show" />
+
+            <LinearLayout
+                android:id="@+id/advanced"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <Button
+                    android:id="@+id/btnConnect"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:backgroundTint="@color/action_neutral"
+                    android:textColor="#FFFFFF"
+                    android:text="@string/btn_connect" />
+
+                <Button
+                    android:id="@+id/btnMount"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:backgroundTint="@color/action_caution"
+                    android:textColor="#FFFFFF"
+                    android:text="@string/btn_mount" />
+
+                <Button
+                    android:id="@+id/btnRestore"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:backgroundTint="@color/action_primary"
+                    android:textColor="#FFFFFF"
+                    android:text="@string/btn_restore" />
+
+                <Button
+                    android:id="@+id/btnRestoreEcu"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:backgroundTint="@color/action_caution"
+                    android:textColor="#FFFFFF"
+                    android:text="@string/btn_restore_ecu" />
+
+                <Button
+                    android:id="@+id/btnForget"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:backgroundTint="@color/action_danger"
+                    android:textColor="#FFFFFF"
+                    android:text="@string/btn_forget" />
+            </LinearLayout>
+        </LinearLayout>
+    </ScrollView>
+
+    <!-- ===== LOG TAB ===== -->
+    <LinearLayout
+        android:id="@+id/pageLog"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="vertical"
+        android:visibility="gone"
+        android:padding="16dp">
+
+        <Button
+            android:id="@+id/btnCopyLog"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
             android:backgroundTint="@color/action_neutral"
             android:textColor="#FFFFFF"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="@string/btn_connect" />
+            android:text="@string/btn_copy_log" />
 
-            <Button
-                android:id="@+id/btnMount"
-            android:backgroundTint="@color/action_caution"
-            android:textColor="#FFFFFF"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="@string/btn_mount" />
-
-            <Button
-                android:id="@+id/btnRestore"
-            android:backgroundTint="@color/action_primary"
-            android:textColor="#FFFFFF"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="@string/btn_restore" />
-
-            <Button
-                android:id="@+id/btnRestoreEcu"
-            android:backgroundTint="@color/action_caution"
-            android:textColor="#FFFFFF"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="@string/btn_restore_ecu" />
-
-            <Button
-                android:id="@+id/btnForget"
-            android:backgroundTint="@color/action_danger"
-            android:textColor="#FFFFFF"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="@string/btn_forget" />
-        </LinearLayout>
-
-        <TextView
-            android:id="@+id/log"
+        <ScrollView
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="20dp"
-            android:fontFamily="monospace"
-            android:textIsSelectable="true"
-            android:textSize="12sp"
-            android:text="" />
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:layout_marginTop="8dp">
+
+            <TextView
+                android:id="@+id/log"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:fontFamily="monospace"
+                android:textIsSelectable="true"
+                android:textSize="12sp"
+                android:text="" />
+        </ScrollView>
     </LinearLayout>
-</ScrollView>
+</LinearLayout>

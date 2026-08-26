@@ -34,7 +34,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var logView: TextView
     private lateinit var warnView: TextView
     private lateinit var destView: TextView
-    private lateinit var progressView: TextView
     private lateinit var summaryView: TextView
 
     private val io = Executors.newSingleThreadExecutor()
@@ -89,7 +88,6 @@ class MainActivity : AppCompatActivity() {
         logView = findViewById(R.id.log)
         warnView = findViewById(R.id.warning)
         destView = findViewById(R.id.dest)
-        progressView = findViewById(R.id.progress)
         summaryView = findViewById(R.id.summary)
 
         findViewById<Button>(R.id.btnConnect).setOnClickListener { connect() }
@@ -128,6 +126,18 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.btnSync).setOnClickListener {
             if (runningJob == null) startSync()
+        }
+
+        selectTab(sync = true)
+        findViewById<Button>(R.id.tabSync).setOnClickListener { selectTab(sync = true) }
+        findViewById<Button>(R.id.tabLog).setOnClickListener { selectTab(sync = false) }
+
+        findViewById<Button>(R.id.btnCopyLog).setOnClickListener {
+            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            cm.setPrimaryClip(
+                android.content.ClipData.newPlainText("MiniLogSync log", logView.text)
+            )
+            android.widget.Toast.makeText(this, "Log copied", android.widget.Toast.LENGTH_SHORT).show()
         }
 
         val advanced = findViewById<android.widget.LinearLayout>(R.id.advanced)
@@ -248,6 +258,21 @@ class MainActivity : AppCompatActivity() {
                 ?: "storage"
         }
         return if (!folder.isNullOrBlank()) "$folder  ($provider)" else provider
+    }
+
+    /** Simple two-page switcher: the diagnostic log gets its own space. */
+    private fun selectTab(sync: Boolean) {
+        findViewById<android.view.View>(R.id.pageSync).visibility =
+            if (sync) android.view.View.VISIBLE else android.view.View.GONE
+        findViewById<android.view.View>(R.id.pageLog).visibility =
+            if (sync) android.view.View.GONE else android.view.View.VISIBLE
+
+        val on = androidx.core.content.ContextCompat.getColor(this, R.color.action_primary)
+        val off = androidx.core.content.ContextCompat.getColor(this, R.color.action_neutral)
+        findViewById<Button>(R.id.tabSync).backgroundTintList =
+            android.content.res.ColorStateList.valueOf(if (sync) on else off)
+        findViewById<Button>(R.id.tabLog).backgroundTintList =
+            android.content.res.ColorStateList.valueOf(if (sync) off else on)
     }
 
     private fun appVersion(): String = try {
