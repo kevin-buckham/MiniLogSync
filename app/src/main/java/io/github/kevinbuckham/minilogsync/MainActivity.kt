@@ -43,8 +43,14 @@ class MainActivity : AppCompatActivity() {
     /** True while the card is handed to the phone - the ECU is NOT logging. */
     private var mountedToPhone = false
 
-    /** Non-null while a sync is running; the Sync button becomes Cancel. */
+    /** Non-null while a sync is running. */
     private var runningJob: SyncJob? = null
+
+    private var progressDialog: androidx.appcompat.app.AlertDialog? = null
+    private var dlgFile: TextView? = null
+    private var dlgName: TextView? = null
+    private var dlgDetail: TextView? = null
+    private var dlgBar: android.widget.ProgressBar? = null
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -121,13 +127,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnDest).setOnClickListener { pickDestination.launch(null) }
 
         findViewById<Button>(R.id.btnSync).setOnClickListener {
-            val job = runningJob
-            if (job != null) {
-                job.cancel()
-                log("Cancelling after the current chunk...")
-            } else {
-                startSync()
-            }
+            if (runningJob == null) startSync()
         }
 
         val advanced = findViewById<android.widget.LinearLayout>(R.id.advanced)
@@ -162,6 +162,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        dismissProgressDialog()
         try { unregisterReceiver(usbReceiver) } catch (_: Exception) {}
         io.shutdown()
         link.close()
@@ -294,24 +295,18 @@ class MainActivity : AppCompatActivity() {
         refresh()
         // A big sync takes minutes; do not let the screen sleep mid-transfer.
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        showProgressDialog(job)
         log("=== Sync started ===")
         setMountedFlag(true)
         io.execute {
             val outcome = job.run(
                 dest,
                 log = { line -> runOnUiThread { log(line) } },
-                progress = { text ->
-                    runOnUiThread {
-                        progressView.text = text
-                        progressView.visibility =
-                            if (text.isBlank()) android.view.View.GONE else android.view.View.VISIBLE
-                    }
-                }
+                progress = { p -> runOnUiThread { updateProgressDialog(p) } }
             )
             runOnUiThread {
                 runningJob = null
-                progressView.text = ""
-                progressView.visibility = android.view.View.GONE
+                dismissProgressDialog()
                 showSummary(outcome)
                 window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 // Only clear the "not logging" state if the ECU actually confirmed
@@ -330,6 +325,44 @@ class MainActivity : AppCompatActivity() {
                 refresh()
             }
         }
+    }
+
+    private fun showProgressDialog(job: SyncJob) {
+        val view = layoutInflater.inflate(R.layout.dialog_progress, null)
+        dlgFile = view.findViewById(R.id.dlgFile)
+        dlgName = view.findViewById(R.id.dlgName)
+        dlgDetail = view.findViewById(R.id.dlgDetail)
+        dlgBar = view.findViewById(R.id.dlgBar)
+
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle(R.string.dlg_title)
+            .setView(view)
+            .setCancelable(false)                       // no accidental dismissal mid-transfer
+            .setNegativeButton(R.string.btn_cancel) { _, _ ->
+                job.cancel()
+                log("Cancelling after the current chunk...")
+            }
+            .create()
+
+        dialog.show()
+        // make Cancel unmistakably the stop button
+        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE)
+            ?.setTextColor(androidx.core.content.ContextCompat.getColor(this, R.color.action_danger))
+        progressDialog = dialog
+    }
+
+    private fun updateProgressDialog(p: SyncJob.Progress?) {
+        if (p == null) return
+        dlgFile?.text = "File ${p.fileIndex} of ${p.fileCount}"
+        dlgName?.text = p.fileName
+        dlgDetail?.text = p.detail
+        dlgBar?.progress = p.overallPercent.coerceIn(0, 100)
+    }
+
+    private fun dismissProgressDialog() {
+        runCatching { progressDialog?.dismiss() }
+        progressDialog = null
+        dlgFile = null; dlgName = null; dlgDetail = null; dlgBar = null
     }
 
     /** A plain-language result that stays on screen, instead of a buried log line. */
@@ -355,8 +388,7 @@ class MainActivity : AppCompatActivity() {
     private fun refresh() {
         destView.text = destinationUri()?.let { "Saving to: ${prettyDest(it)}" }
             ?: getString(R.string.dest_unset)
-        findViewById<Button>(R.id.btnSync).text =
-            getString(if (runningJob != null) R.string.btn_cancel else R.string.btn_sync)
+        findViewById<Button>(R.id.btnSync).isEnabled = runningJob == null
         val state = when {
             runningJob != null -> getString(R.string.status_syncing)
             !link.isOpen -> getString(R.string.status_disconnected)

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- primary action: the one button you normally press -->
+    <color name="action_primary">#2E7D32</color>
+    <!-- destructive / stop -->
+    <color name="action_danger">#C62828</color>
+    <!-- caution: leaves the ECU not logging, or discards state -->
+    <color name="action_caution">#EF6C00</color>
+    <!-- neutral secondary -->
+    <color name="action_neutral">#455A64</color>
+    <color name="warn_bg">#8B0000</color>
+</resources>

@@ -62,6 +62,8 @@
             android:layout_marginTop="16dp"
             android:textSize="18sp"
             android:textStyle="bold"
+            android:backgroundTint="@color/action_primary"
+            android:textColor="#FFFFFF"
             android:text="@string/btn_sync" />
 
         <!-- destination, secondary -->
@@ -75,6 +77,8 @@
 
         <Button
             android:id="@+id/btnDest"
+            android:backgroundTint="@color/action_neutral"
+            android:textColor="#FFFFFF"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
@@ -83,6 +87,8 @@
         <!-- rarely needed, tucked away so they cannot be mis-tapped -->
         <Button
             android:id="@+id/btnAdvanced"
+            android:backgroundTint="@color/action_neutral"
+            android:textColor="#FFFFFF"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="20dp"
@@ -97,6 +103,8 @@
 
             <Button
                 android:id="@+id/btnConnect"
+            android:backgroundTint="@color/action_neutral"
+            android:textColor="#FFFFFF"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
@@ -104,6 +112,8 @@
 
             <Button
                 android:id="@+id/btnMount"
+            android:backgroundTint="@color/action_caution"
+            android:textColor="#FFFFFF"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
@@ -111,6 +121,8 @@
 
             <Button
                 android:id="@+id/btnRestore"
+            android:backgroundTint="@color/action_primary"
+            android:textColor="#FFFFFF"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
@@ -118,6 +130,8 @@
 
             <Button
                 android:id="@+id/btnRestoreEcu"
+            android:backgroundTint="@color/action_caution"
+            android:textColor="#FFFFFF"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
@@ -125,6 +139,8 @@
 
             <Button
                 android:id="@+id/btnForget"
+            android:backgroundTint="@color/action_danger"
+            android:textColor="#FFFFFF"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"

@@ -20,4 +20,6 @@
     <string name="btn_restore_ecu">Force ECU logging</string>
     <string name="btn_advanced_show">Advanced ▾</string>
     <string name="btn_advanced_hide">Advanced ▴</string>
+    <string name="dlg_title">Syncing logs from the ECU</string>
+    <string name="warn_dialog_not_logging">The ECU is not logging while this runs.\nCancelling is safe - finished files are kept and the rest resume next time.</string>
 </resources>

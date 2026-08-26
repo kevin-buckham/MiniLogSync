@@ -24,6 +24,15 @@ class SyncJob(
     private val history: SyncHistory
 ) {
 
+    /** Structured so the UI can drive a real progress bar, not just print a line. */
+    data class Progress(
+        val fileIndex: Int,
+        val fileCount: Int,
+        val fileName: String,
+        val overallPercent: Int,
+        val detail: String
+    )
+
     /** Set from the UI thread to stop after the current chunk. */
     val cancelled = AtomicBoolean(false)
 
@@ -45,7 +54,7 @@ class SyncJob(
         val clean: Boolean get() = failed == 0 && !cancelled && restored
     }
 
-    fun run(destTree: Uri, log: (String) -> Unit, progress: (String) -> Unit = {}): Outcome {
+    fun run(destTree: Uri, log: (String) -> Unit, progress: (Progress?) -> Unit = {}): Outcome {
         var copied = 0
         var skipped = 0
         var failed = 0
@@ -101,7 +110,7 @@ class SyncJob(
                     if (!active()) break
                 }
 
-                progress("")
+                progress(null)
                 if (active()) log("Done: $copied new, $skipped already had, $failed failed")
             }
         } catch (e: Exception) {
@@ -182,10 +191,15 @@ class SyncJob(
                         val overall = if (bytesTotal > 0)
                             ((bytesBefore + soFar) * 100 / bytesTotal) else 0
                         progress(
-                            "File $index/$count  $pct%  ${fmtMb(soFar)}/${fmtMb(size)}" +
-                                "   ${fmtRate(rate)}\n" +
-                                "Overall $overall%   ${etaText(bytesTotal - bytesBefore - soFar, rate)}\n" +
-                                name
+                            Progress(
+                                fileIndex = index,
+                                fileCount = count,
+                                fileName = name,
+                                overallPercent = overall.toInt(),
+                                detail = "$pct% of this file  ${fmtMb(soFar)}/${fmtMb(size)}" +
+                                    "   ${fmtRate(rate)}\n" +
+                                    etaText(bytesTotal - bytesBefore - soFar, rate)
+                            )
                         )
                     }
                 }
@@ -212,7 +226,9 @@ class SyncJob(
             // BLOCKER fix: closing a SAF stream does not mean the bytes are
             // durable - cloud providers buffer and can fail the upload later.
             // Read the destination back and verify before trusting it.
-            progress("File $index/$count  verifying ${fmtMb(written)}...\n$name")
+            progress(
+                Progress(index, count, name, 100, "verifying ${fmtMb(written)} on the destination…")
+            )
             val readBack = verifyDestination(tmp, written, sourceCrc.value)
             if (readBack != null) {
                 log("  VERIFY FAILED $name: $readBack - not recording")
