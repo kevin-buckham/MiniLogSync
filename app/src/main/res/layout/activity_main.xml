@@ -9,45 +9,67 @@
         android:layout_height="wrap_content"
         android:orientation="vertical">
 
+        <!-- state -->
         <TextView
             android:id="@+id/status"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:textSize="20sp"
             android:textStyle="bold"
-            android:paddingBottom="8dp"
             android:text="@string/status_disconnected" />
 
+        <!-- loud, impossible to miss: the ECU is not logging -->
         <TextView
             android:id="@+id/warning"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:background="#8B0000"
+            android:textColor="#FFFFFF"
             android:textSize="16sp"
             android:textStyle="bold"
-            android:paddingBottom="12dp"
-            android:text="" />
+            android:padding="12dp"
+            android:layout_marginTop="8dp"
+            android:visibility="gone"
+            android:text="@string/warn_not_logging" />
 
-        <Button
-            android:id="@+id/btnConnect"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/btn_connect" />
-
+        <!-- live transfer progress -->
         <TextView
             android:id="@+id/progress"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:paddingBottom="8dp"
+            android:layout_marginTop="8dp"
             android:fontFamily="monospace"
             android:textSize="15sp"
             android:textStyle="bold"
+            android:visibility="gone"
             android:text="" />
 
+        <!-- last outcome, kept visible after a sync -->
+        <TextView
+            android:id="@+id/summary"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:textSize="16sp"
+            android:visibility="gone"
+            android:text="" />
+
+        <!-- THE primary action -->
+        <Button
+            android:id="@+id/btnSync"
+            android:layout_width="match_parent"
+            android:layout_height="72dp"
+            android:layout_marginTop="16dp"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:text="@string/btn_sync" />
+
+        <!-- destination, secondary -->
         <TextView
             android:id="@+id/dest"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:paddingBottom="4dp"
+            android:layout_marginTop="14dp"
             android:textSize="15sp"
             android:text="@string/dest_unset" />
 
@@ -55,56 +77,65 @@
             android:id="@+id/btnDest"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
+            android:layout_marginTop="4dp"
             android:text="@string/btn_dest" />
 
+        <!-- rarely needed, tucked away so they cannot be mis-tapped -->
         <Button
-            android:id="@+id/btnSync"
+            android:id="@+id/btnAdvanced"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="@string/btn_sync" />
+            android:layout_marginTop="20dp"
+            android:text="@string/btn_advanced_show" />
 
-        <Button
-            android:id="@+id/btnForget"
+        <LinearLayout
+            android:id="@+id/advanced"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="@string/btn_forget" />
+            android:orientation="vertical"
+            android:visibility="gone">
 
-        <Button
-            android:id="@+id/btnMount"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="@string/btn_mount" />
+            <Button
+                android:id="@+id/btnConnect"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/btn_connect" />
 
-        <Button
-            android:id="@+id/btnRestore"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="@string/btn_restore" />
+            <Button
+                android:id="@+id/btnMount"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/btn_mount" />
 
-        <Button
-            android:id="@+id/btnRestoreEcu"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="@string/btn_restore_ecu" />
+            <Button
+                android:id="@+id/btnRestore"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/btn_restore" />
 
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:paddingTop="16dp"
-            android:paddingBottom="8dp"
-            android:textSize="14sp"
-            android:text="@string/hint" />
+            <Button
+                android:id="@+id/btnRestoreEcu"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/btn_restore_ecu" />
+
+            <Button
+                android:id="@+id/btnForget"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/btn_forget" />
+        </LinearLayout>
 
         <TextView
             android:id="@+id/log"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
             android:fontFamily="monospace"
             android:textIsSelectable="true"
             android:textSize="12sp"

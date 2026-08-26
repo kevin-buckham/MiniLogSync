@@ -35,6 +35,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var warnView: TextView
     private lateinit var destView: TextView
     private lateinit var progressView: TextView
+    private lateinit var summaryView: TextView
 
     private val io = Executors.newSingleThreadExecutor()
     private val stamp = SimpleDateFormat("HH:mm:ss", Locale.US)
@@ -83,6 +84,7 @@ class MainActivity : AppCompatActivity() {
         warnView = findViewById(R.id.warning)
         destView = findViewById(R.id.dest)
         progressView = findViewById(R.id.progress)
+        summaryView = findViewById(R.id.summary)
 
         findViewById<Button>(R.id.btnConnect).setOnClickListener { connect() }
 
@@ -126,6 +128,14 @@ class MainActivity : AppCompatActivity() {
             } else {
                 startSync()
             }
+        }
+
+        val advanced = findViewById<android.widget.LinearLayout>(R.id.advanced)
+        findViewById<Button>(R.id.btnAdvanced).setOnClickListener { b ->
+            val show = advanced.visibility != android.view.View.VISIBLE
+            advanced.visibility = if (show) android.view.View.VISIBLE else android.view.View.GONE
+            (b as Button).text =
+                getString(if (show) R.string.btn_advanced_hide else R.string.btn_advanced_show)
         }
 
         findViewById<Button>(R.id.btnForget).setOnClickListener {
@@ -216,15 +226,27 @@ class MainActivity : AppCompatActivity() {
             refresh()
         }
 
-    /** Best-effort readable name for a SAF tree uri (provider + last path segment). */
+    /**
+     * Human-readable destination. Cloud providers hand out opaque document ids
+     * (Drive's look like "acc=1;doc=encoded=6lBSW..."), so ask the provider for
+     * the folder's display name instead of parsing the uri.
+     */
     private fun prettyDest(uri: Uri): String {
-        val leaf = uri.lastPathSegment?.substringAfterLast(':')?.ifBlank { null }
-        val provider = uri.authority
-            ?.removePrefix("com.android.")
-            ?.removeSuffix(".documents")
-            ?.removeSuffix(".storage.documents")
-            ?: "?"
-        return if (leaf != null) "$leaf  ($provider)" else provider
+        val folder = runCatching {
+            androidx.documentfile.provider.DocumentFile.fromTreeUri(this, uri)?.name
+        }.getOrNull()
+
+        val provider = when (uri.authority) {
+            "com.google.android.apps.docs.storage" -> "Google Drive"
+            "com.android.externalstorage.documents" -> "Device storage"
+            "com.android.providers.downloads.documents" -> "Downloads"
+            "com.microsoft.skydrive.content.StorageAccessProvider" -> "OneDrive"
+            else -> uri.authority
+                ?.removePrefix("com.android.")
+                ?.removeSuffix(".documents")
+                ?: "storage"
+        }
+        return if (!folder.isNullOrBlank()) "$folder  ($provider)" else provider
     }
 
     private fun appVersion(): String = try {
@@ -278,11 +300,19 @@ class MainActivity : AppCompatActivity() {
             val outcome = job.run(
                 dest,
                 log = { line -> runOnUiThread { log(line) } },
-                progress = { text -> runOnUiThread { progressView.text = text } }
+                progress = { text ->
+                    runOnUiThread {
+                        progressView.text = text
+                        progressView.visibility =
+                            if (text.isBlank()) android.view.View.GONE else android.view.View.VISIBLE
+                    }
+                }
             )
             runOnUiThread {
                 runningJob = null
                 progressView.text = ""
+                progressView.visibility = android.view.View.GONE
+                showSummary(outcome)
                 window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 // Only clear the "not logging" state if the ECU actually confirmed
                 // it took the card back. Never tell the owner it is safe to drive
@@ -302,22 +332,45 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** A plain-language result that stays on screen, instead of a buried log line. */
+    private fun showSummary(o: SyncJob.Outcome) {
+        val parts = mutableListOf<String>()
+        parts += when (o.copied) {
+            0 -> "No new logs"
+            1 -> "1 new log copied"
+            else -> "${o.copied} new logs copied"
+        }
+        if (o.skipped > 0) parts += "${o.skipped} already had"
+        if (o.failed > 0) parts += "${o.failed} FAILED (will retry next sync)"
+        if (o.cancelled) parts += "cancelled"
+
+        summaryView.text = when {
+            !o.restored -> "\u26a0 " + parts.joinToString(", ") +
+                "\nECU LOGGING NOT CONFIRMED - reconnect and tap 'Force ECU logging'"
+            else -> parts.joinToString(", ") + "\nCard returned to ECU, logging resumed."
+        }
+        summaryView.visibility = android.view.View.VISIBLE
+    }
+
     private fun refresh() {
         destView.text = destinationUri()?.let { "Saving to: ${prettyDest(it)}" }
             ?: getString(R.string.dest_unset)
         findViewById<Button>(R.id.btnSync).text =
             getString(if (runningJob != null) R.string.btn_cancel else R.string.btn_sync)
         val state = when {
+            runningJob != null -> getString(R.string.status_syncing)
             !link.isOpen -> getString(R.string.status_disconnected)
             mountedToPhone -> getString(R.string.status_mounted)
             else -> getString(R.string.status_connected)
         }
         statusView.text = "$state\nbuild ${appVersion()}"
-        warnView.text = if (mountedToPhone) getString(R.string.warn_not_logging) else ""
+        warnView.visibility =
+            if (mountedToPhone) android.view.View.VISIBLE else android.view.View.GONE
     }
 
     private fun warn(text: String) {
         warnView.text = text
+        warnView.visibility = android.view.View.VISIBLE
         log(text)
     }
 

@@ -1,18 +1,23 @@
 <resources>
     <string name="app_name">MiniLogSync</string>
-    <string name="status_no_device">No ECU detected</string>
+
+    <string name="status_no_device">No ECU detected - check the cable and key</string>
     <string name="status_disconnected">Not connected</string>
     <string name="status_connected">Connected - ECU is logging</string>
     <string name="status_mounted">Card mounted to phone</string>
-    <string name="warn_not_logging">ECU IS NOT LOGGING while the card is mounted. Tap \"Return to ECU\" when done copying.</string>
-    <string name="btn_connect">Connect</string>
-    <string name="btn_mount">Mount card to phone</string>
-    <string name="btn_restore">Return to ECU (auto)</string>
-    <string name="btn_restore_ecu">Force ECU logging</string>
-    <string name="hint">Copy logs in the Files app while mounted, then return the card to the ECU.</string>
+    <string name="status_syncing">Syncing…</string>
+
+    <string name="warn_not_logging">ECU IS NOT LOGGING\nThe card is mounted to the phone. Use \"Return to ECU\" before driving.</string>
+
     <string name="dest_unset">No destination folder chosen yet</string>
     <string name="btn_dest">Choose destination folder</string>
     <string name="btn_sync">SYNC NEW LOGS</string>
     <string name="btn_cancel">CANCEL SYNC</string>
-    <string name="btn_forget">Forget sync history</string>
+    <string name="btn_forget">Forget sync history (re-copy everything)</string>
+    <string name="btn_connect">Reconnect</string>
+    <string name="btn_mount">Mount card to phone (manual)</string>
+    <string name="btn_restore">Return card to ECU</string>
+    <string name="btn_restore_ecu">Force ECU logging</string>
+    <string name="btn_advanced_show">Advanced ▾</string>
+    <string name="btn_advanced_hide">Advanced ▴</string>
 </resources>
