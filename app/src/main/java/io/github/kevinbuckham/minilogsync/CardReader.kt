@@ -69,7 +69,11 @@ class CardReader(private val context: Context) {
                 try {
                     val block = BlockDeviceDriverFactory.createBlockDevice(c, lun = lun.toByte())
                     block.init()
+                    dumpLun(lun, block, log)
                     val table = PartitionTableFactory.createPartitionTable(block)
+                    if (table.partitionTableEntries.isEmpty()) {
+                        log("  LUN $lun: partition table has no entries")
+                    }
                     for (entry in table.partitionTableEntries) {
                         val partition = Partition.createPartition(entry, block) ?: continue
                         val fs = partition.fileSystem ?: continue
@@ -101,6 +105,53 @@ class CardReader(private val context: Context) {
         }
 
         return "No volume containing rusEFI logs found (is the card mounted? tap Mount first)"
+    }
+
+    /**
+     * Logs what a LUN actually contains.
+     *
+     * libaums can only read FAT32 - its FileSystemFactory registers
+     * Fat32FileSystemCreator and nothing else - so when a LUN is rejected we
+     * have to know whether it is exFAT/FAT16 (not fixable in this app at all)
+     * or a FAT32 volume we are mis-parsing. Guessing has cost several rounds
+     * already; this prints the bytes.
+     */
+    private fun dumpLun(
+        lun: Int,
+        block: me.jahnen.libaums.core.driver.BlockDeviceDriver,
+        log: (String) -> Unit
+    ) {
+        try {
+            val bs = block.blockSize
+            val mb = block.blocks * bs / (1024L * 1024L)
+            log("  LUN $lun: blockSize=$bs blocks=${block.blocks} (~$mb MB)")
+
+            val buf = java.nio.ByteBuffer.allocate(maxOf(512, bs))
+            block.read(0, buf)
+            buf.order(java.nio.ByteOrder.LITTLE_ENDIAN)
+
+            fun ascii(off: Int, len: Int) = (off until off + len)
+                .joinToString("") {
+                    val v = buf.get(it).toInt() and 0xFF
+                    if (v in 32..126) v.toChar().toString() else "."
+                }
+            fun hex(off: Int, len: Int) =
+                (off until off + len).joinToString(" ") { "%02X".format(buf.get(it)) }
+
+            log("    s0[0..15] ${hex(0, 16)}")
+            log("    oem='${ascii(3, 8)}' fat16id='${ascii(0x36, 8)}' fat32id='${ascii(0x52, 8)}'")
+            log("    sig=${hex(510, 2)}")
+            for (i in 0..3) {
+                val o = 446 + i * 16
+                val ty = buf.get(o + 4).toInt() and 0xFF
+                if (ty == 0) continue
+                log("    mbr[$i] type=0x%02X lba=%d count=%d"
+                    .format(ty, buf.getInt(o + 8), buf.getInt(o + 12)))
+            }
+        } catch (e: Exception) {
+            log("  LUN $lun: sector 0 unreadable: " +
+                "${e.javaClass.simpleName}: ${e.message ?: "(no message)"}")
+        }
     }
 
     private data class Msc(val iface: UsbInterface, val inEp: UsbEndpoint, val outEp: UsbEndpoint)
