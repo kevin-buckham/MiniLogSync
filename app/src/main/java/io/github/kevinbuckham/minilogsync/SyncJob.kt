@@ -155,7 +155,7 @@ class SyncJob(
         count: Int,
         bytesBefore: Long,
         bytesTotal: Long,
-        progress: (String) -> Unit
+        progress: (Progress?) -> Unit
     ): FileResult {
         val name = f.name
         val size = f.length
