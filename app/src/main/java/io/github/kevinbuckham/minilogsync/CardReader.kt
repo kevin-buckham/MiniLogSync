@@ -1,9 +1,17 @@
 package io.github.kevinbuckham.minilogsync
 
 import android.content.Context
-import me.jahnen.libaums.core.UsbMassStorageDevice
+import android.hardware.usb.UsbConstants
+import android.hardware.usb.UsbEndpoint
+import android.hardware.usb.UsbInterface
+import android.hardware.usb.UsbManager
+import me.jahnen.libaums.core.driver.BlockDeviceDriverFactory
 import me.jahnen.libaums.core.fs.UsbFile
 import me.jahnen.libaums.core.fs.UsbFileInputStream
+import me.jahnen.libaums.core.partition.Partition
+import me.jahnen.libaums.core.partition.PartitionTableFactory
+import me.jahnen.libaums.core.usb.UsbCommunication
+import me.jahnen.libaums.core.usb.UsbCommunicationFactory
 import java.io.OutputStream
 
 /**
@@ -19,46 +27,95 @@ import java.io.OutputStream
  */
 class CardReader(private val context: Context) {
 
-    private var device: UsbMassStorageDevice? = null
+    private var comm: UsbCommunication? = null
     private var root: UsbFile? = null
 
     /** Opens the card. Returns null on success, or a human-readable error. */
     fun open(log: (String) -> Unit = {}): String? {
         close()
 
-        val devices = UsbMassStorageDevice.getMassStorageDevices(context)
-        if (devices.isEmpty()) return "No mass-storage interface found on the ECU"
+        val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
 
-        for (dev in devices) {
-            try {
-                dev.init()
+        // We deliberately do NOT use UsbMassStorageDevice.init(): it walks the
+        // LUNs but only tolerates "no media" per LUN - an unreadable LUN throws
+        // UnsupportedPartitionTableException straight out of the enumeration.
+        // This ECU exposes LUN 0 as a small INI ramdisk that libaums cannot
+        // parse, which aborted the walk before ever reaching the SD card on
+        // LUN 1. So enumerate the LUNs ourselves and skip the bad ones.
+        for (dev in usbManager.deviceList.values) {
+            if (!usbManager.hasPermission(dev)) continue
+
+            val (iface, inEp, outEp) = findMassStorage(dev) ?: continue
+
+            val c = try {
+                UsbCommunicationFactory.createUsbCommunication(usbManager, dev, iface, outEp, inEp)
             } catch (e: Exception) {
-                // Do NOT swallow this silently: if probing the ECU's USB stack
-                // ever upsets it, this message is the only trail we would have.
-                log("  storage init failed: ${e.javaClass.simpleName}: ${e.message ?: "(no message)"}")
+                log("  cannot open mass storage: ${e.javaClass.simpleName}: ${e.message ?: "(no message)"}")
                 continue
             }
 
-            // Pick the volume that looks like the log card rather than the INI
-            // ramdisk: the card is the one holding rusEFI log/report files.
-            for (partition in dev.partitions) {
-                val fs = partition.fileSystem ?: continue
-                val r = fs.rootDirectory ?: continue
-                val names = runCatching { r.list().toList() }.getOrDefault(emptyList())
-                val looksLikeCard = names.any {
-                    it.startsWith("re_") || it.endsWith(".mlg") ||
-                        it.contains("fail_") || it == "index.txt"
-                }
-                if (looksLikeCard) {
-                    device = dev
-                    root = r
-                    return null
+            val maxLunBuf = ByteArray(1)
+            val maxLun = try {
+                c.controlTransfer(161, 254, 0, iface.id, maxLunBuf, 1)
+                maxLunBuf[0].toInt() and 0xFF
+            } catch (e: Exception) {
+                log("  GET_MAX_LUN failed (${e.javaClass.simpleName}), assuming 1 LUN")
+                0
+            }
+            log("  device exposes ${maxLun + 1} LUN(s)")
+
+            for (lun in 0..maxLun) {
+                try {
+                    val block = BlockDeviceDriverFactory.createBlockDevice(c, lun = lun.toByte())
+                    block.init()
+                    val table = PartitionTableFactory.createPartitionTable(block)
+                    for (entry in table.partitionTableEntries) {
+                        val partition = Partition.createPartition(entry, block) ?: continue
+                        val fs = partition.fileSystem ?: continue
+                        val r = fs.rootDirectory ?: continue
+                        val names = runCatching { r.list().toList() }.getOrDefault(emptyList())
+                        val looksLikeCard = names.any {
+                            it.startsWith("re_") || it.endsWith(".mlg") ||
+                                it.contains("fail_") || it == "index.txt"
+                        }
+                        log("  LUN $lun: ${names.size} entries" +
+                            if (looksLikeCard) " <- rusEFI log card" else " (not the log card)")
+                        if (looksLikeCard) {
+                            comm = c
+                            root = r
+                            return null
+                        }
+                    }
+                } catch (e: Exception) {
+                    // Expected for LUN 0 (the INI ramdisk) and for empty slots.
+                    log("  LUN $lun skipped: ${e.javaClass.simpleName}")
                 }
             }
-            dev.close()
+            runCatching { c.close() }
         }
-        return "Found storage, but no volume containing rusEFI logs " +
-            "(is the card mounted? tap Mount first)"
+
+        return "No volume containing rusEFI logs found (is the card mounted? tap Mount first)"
+    }
+
+    private data class Msc(val iface: UsbInterface, val inEp: UsbEndpoint, val outEp: UsbEndpoint)
+
+    /** Bulk-only SCSI mass storage: class 8, subclass 6, protocol 80. */
+    private fun findMassStorage(dev: android.hardware.usb.UsbDevice): Msc? {
+        for (i in 0 until dev.interfaceCount) {
+            val iface = dev.getInterface(i)
+            if (iface.interfaceClass != UsbConstants.USB_CLASS_MASS_STORAGE) continue
+            if (iface.interfaceSubclass != 6 || iface.interfaceProtocol != 80) continue
+
+            var inEp: UsbEndpoint? = null
+            var outEp: UsbEndpoint? = null
+            for (j in 0 until iface.endpointCount) {
+                val ep = iface.getEndpoint(j)
+                if (ep.type != UsbConstants.USB_ENDPOINT_XFER_BULK) continue
+                if (ep.direction == UsbConstants.USB_DIR_IN) inEp = ep else outEp = ep
+            }
+            if (inEp != null && outEp != null) return Msc(iface, inEp, outEp)
+        }
+        return null
     }
 
     /** Files in the card root, excluding directories. */
@@ -237,8 +294,8 @@ class CardReader(private val context: Context) {
     }
 
     fun close() {
-        runCatching { device?.close() }
-        device = null
+        runCatching { comm?.close() }
+        comm = null
         root = null
     }
 }
