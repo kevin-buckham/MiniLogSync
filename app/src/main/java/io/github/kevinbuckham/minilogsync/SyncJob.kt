@@ -63,6 +63,11 @@ class SyncJob(
         }
         log("Card mounted; ECU is not logging")
 
+        // Hand the USB device over to the storage layer: Android will not give
+        // libaums a connection while our CDC link holds one.
+        link.releaseForStorage()
+        log("Serial link released for storage access")
+
         val card = CardReader(context)
         try {
             val err = openCardWithRetry(card, log)
@@ -104,6 +109,10 @@ class SyncJob(
         } finally {
             card.close()
         }
+
+        // Re-acquire the serial link so we can hand the card back.
+        val reopened = link.reopen()
+        if (!link.isOpen) log("WARNING: $reopened")
 
         // ALWAYS give the card back, and report honestly whether it worked.
         val restored = restoreLogging(log)

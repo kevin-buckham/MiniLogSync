@@ -40,6 +40,7 @@ class EcuLink(private val context: Context) {
         context.getSystemService(Context.USB_SERVICE) as UsbManager
 
     private var port: UsbSerialPort? = null
+    private var lastDevice: UsbDevice? = null
 
     val isOpen: Boolean get() = port != null
 
@@ -77,6 +78,7 @@ class EcuLink(private val context: Context) {
     /** Opens the CDC port. Returns a human-readable description of what happened. */
     fun open(device: UsbDevice): String {
         close()
+        lastDevice = device
 
         val driver = UsbSerialProber.getDefaultProber().probeDevice(device)
             ?: CdcAcmSerialDriver(device)
@@ -105,6 +107,27 @@ class EcuLink(private val context: Context) {
     fun close() {
         try { port?.close() } catch (_: Exception) {}
         port = null
+    }
+
+    /**
+     * Release the USB device so the mass-storage layer can open it.
+     *
+     * Android will not hand a second UsbDeviceConnection to libaums while we
+     * hold one for the CDC interface - that shows up as a null-message NPE
+     * inside libaums' init(). The SD mode already requested on the ECU persists
+     * across this, so dropping the serial link here is safe.
+     */
+    fun releaseForStorage() = close()
+
+    /** Re-acquire the serial link after the storage phase, so we can restore logging. */
+    fun reopen(): String {
+        val device = lastDevice ?: findDevice() ?: return "No ECU found to reconnect"
+        for (attempt in 1..5) {
+            val msg = open(device)
+            if (isOpen) return msg
+            Thread.sleep(400L * attempt)
+        }
+        return "Could not reopen the serial link"
     }
 
     /**

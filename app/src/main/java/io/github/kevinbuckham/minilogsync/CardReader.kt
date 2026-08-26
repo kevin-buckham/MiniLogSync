@@ -35,7 +35,7 @@ class CardReader(private val context: Context) {
             } catch (e: Exception) {
                 // Do NOT swallow this silently: if probing the ECU's USB stack
                 // ever upsets it, this message is the only trail we would have.
-                log("  storage init failed: ${e.message}")
+                log("  storage init failed: ${e.javaClass.simpleName}: ${e.message ?: "(no message)"}")
                 continue
             }
 
