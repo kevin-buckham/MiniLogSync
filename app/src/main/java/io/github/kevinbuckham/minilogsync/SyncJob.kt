@@ -54,10 +54,20 @@ class SyncJob(
         val clean: Boolean get() = failed == 0 && !cancelled && restored
     }
 
-    fun run(destTree: Uri, log: (String) -> Unit, progress: (Progress?) -> Unit = {}): Outcome {
+    /**
+     * @param onSafeToUnplug fired once the ECU has its card back and the USB link is
+     *        no longer needed - the owner can leave while verification finishes.
+     */
+    fun run(
+        destTree: Uri,
+        log: (String) -> Unit,
+        progress: (Progress?) -> Unit = {},
+        onSafeToUnplug: () -> Unit = {}
+    ): Outcome {
         var copied = 0
         var skipped = 0
         var failed = 0
+        val pending = mutableListOf<Pending>()
 
         val dest = DocumentFile.fromTreeUri(context, destTree)
         if (dest == null || !dest.canWrite()) {
@@ -99,19 +109,20 @@ class SyncJob(
                     }
                     val isNew = !history.isCopied(f.name, f.length)
                     if (isNew) index++
-                    when (copyOne(card, f, dest, log, index, todo.size, doneBytes, totalBytes, progress)) {
-                        FileResult.COPIED -> { copied++; doneBytes += f.length }
+                    when (copyOne(card, f, dest, log, index, todo.size, doneBytes, totalBytes,
+                                  progress, pending)) {
+                        FileResult.COPIED -> doneBytes += f.length
                         FileResult.SKIPPED -> skipped++
                         FileResult.FAILED -> failed++
                         FileResult.CANCELLED -> {
-                            log("Cancelled during ${f.name} - $copied saved, this one retries next time")
+                            log("Cancelled during ${f.name} - ${pending.size} saved, this one retries next time")
                         }
                     }
                     if (!active()) break
                 }
 
                 progress(null)
-                if (active()) log("Done: $copied new, $skipped already had, $failed failed")
+                if (active()) log("Copied ${pending.size} file(s) off the card")
             }
         } catch (e: Exception) {
             log("Sync error: ${e.message}")
@@ -124,8 +135,67 @@ class SyncJob(
         if (!link.isOpen) log("WARNING: $reopened")
 
         // ALWAYS give the card back, and report honestly whether it worked.
+        // This happens BEFORE verification on purpose: verification reads the
+        // DESTINATION, not the card, so holding the ECU un-mounted through it kept
+        // the engine from logging for no reason - roughly 40% of the total run.
         val restored = restoreLogging(log)
+        if (restored) {
+            log("*** SAFE TO UNPLUG - the ECU has its card back and is logging ***")
+            if (pending.isNotEmpty()) {
+                log("Verifying ${pending.size} file(s) on the destination; the ECU is no longer needed.")
+            }
+            onSafeToUnplug()
+        }
+
+        // Verification phase - destination only. If the app is killed here, nothing is
+        // corrupted: unverified files simply are not recorded, so they copy again next time.
+        for ((i, p) in pending.withIndex()) {
+            progress(Progress(i + 1, pending.size, p.name, 100,
+                "verifying ${fmtMb(p.written)} on the destination…"))
+            when (finalize(p, dest, log)) {
+                true -> copied++
+                false -> failed++
+            }
+        }
+        progress(null)
+        log("Done: $copied new, $skipped already had, $failed failed")
+
         return Outcome(copied, skipped, failed, cancelled.get(), restored)
+    }
+
+    /** A file copied off the card, not yet verified or recorded. */
+    private data class Pending(
+        val tmp: DocumentFile,
+        val name: String,
+        val cardSize: Long,
+        val written: Long,
+        val crc: Long
+    )
+
+    /**
+     * Verify one copied file against the source bytes, then publish and record it.
+     * Runs after the ECU has its card back, so it costs no logging downtime.
+     */
+    private fun finalize(p: Pending, dest: DocumentFile, log: (String) -> Unit): Boolean = try {
+        val bad = verifyDestination(p.tmp, p.written, p.crc)
+        if (bad != null) {
+            log("  VERIFY FAILED ${p.name}: $bad - not recording, will retry next sync")
+            p.tmp.delete()
+            false
+        } else {
+            dest.findFile(p.name)?.delete()
+            if (!p.tmp.renameTo(p.name)) {
+                log("  Could not rename ${p.name}.part - not recording")
+                false
+            } else {
+                // Key on the CARD's size so the next sync still recognises this file.
+                history.markCopied(p.name, p.cardSize)
+                true
+            }
+        }
+    } catch (e: Exception) {
+        log("  VERIFY ERROR ${p.name}: ${e.message} - will retry next sync")
+        false
     }
 
     /**
@@ -157,7 +227,8 @@ class SyncJob(
         count: Int,
         bytesBefore: Long,
         bytesTotal: Long,
-        progress: (Progress?) -> Unit
+        progress: (Progress?) -> Unit,
+        pending: MutableList<Pending>
     ): FileResult {
         val name = f.name
         val size = f.length
@@ -225,28 +296,17 @@ class SyncJob(
                     "($records records, $saved% less to transfer)")
             }
 
-            // BLOCKER fix: closing a SAF stream does not mean the bytes are
-            // durable - cloud providers buffer and can fail the upload later.
-            // Read the destination back and verify before trusting it.
-            progress(
-                Progress(index, count, name, 100, "verifying ${fmtMb(written)} on the destination…")
+            // Verification is DEFERRED until after the ECU has its card back.
+            // Closing a SAF stream does not mean the bytes are durable - cloud
+            // providers buffer and can fail an upload later - so it still happens,
+            // just off the critical path where it costs no logging downtime.
+            pending += Pending(
+                tmp = tmp,
+                name = name,
+                cardSize = size,          // key history on the CARD size, not the trimmed size
+                written = written,
+                crc = sourceCrc.value
             )
-            val readBack = verifyDestination(tmp, written, sourceCrc.value)
-            if (readBack != null) {
-                log("  VERIFY FAILED $name: $readBack - not recording")
-                tmp.delete()
-                return FileResult.FAILED
-            }
-
-            dest.findFile(name)?.delete()
-            if (!tmp.renameTo(name)) {
-                log("  Could not rename $tmpName - not recording")
-                return FileResult.FAILED
-            }
-
-            // Key on the CARD's size, not the trimmed size, so the next sync still
-            // recognises this file on the card.
-            history.markCopied(name, size)
             FileResult.COPIED
         } catch (e: Exception) {
             log("  FAILED $name: ${e.message}")

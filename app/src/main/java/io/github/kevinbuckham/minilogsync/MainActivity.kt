@@ -50,6 +50,8 @@ class MainActivity : AppCompatActivity() {
     private var dlgName: TextView? = null
     private var dlgDetail: TextView? = null
     private var dlgBar: android.widget.ProgressBar? = null
+    private var dlgUnplug: TextView? = null
+    private var dlgWarn: TextView? = null
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -327,7 +329,8 @@ class MainActivity : AppCompatActivity() {
             val outcome = job.run(
                 dest,
                 log = { line -> runOnUiThread { log(line) } },
-                progress = { p -> runOnUiThread { updateProgressDialog(p) } }
+                progress = { p -> runOnUiThread { updateProgressDialog(p) } },
+                onSafeToUnplug = { runOnUiThread { announceSafeToUnplug() } }
             )
             runOnUiThread {
                 runningJob = null
@@ -358,6 +361,8 @@ class MainActivity : AppCompatActivity() {
         dlgName = view.findViewById(R.id.dlgName)
         dlgDetail = view.findViewById(R.id.dlgDetail)
         dlgBar = view.findViewById(R.id.dlgBar)
+        dlgUnplug = view.findViewById(R.id.dlgUnplug)
+        dlgWarn = view.findViewById(R.id.dlgWarn)
 
         val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle(R.string.dlg_title)
@@ -376,6 +381,40 @@ class MainActivity : AppCompatActivity() {
         progressDialog = dialog
     }
 
+    /**
+     * The ECU has its card back; everything left runs on the phone. Say so loudly -
+     * this is worth several minutes of not standing next to the car.
+     */
+    private fun announceSafeToUnplug() {
+        mountedToPhone = false
+        setMountedFlag(false)
+
+        dlgUnplug?.visibility = android.view.View.VISIBLE
+        dlgWarn?.setTextColor(androidx.core.content.ContextCompat.getColor(this, R.color.action_primary))
+        dlgWarn?.text = getString(R.string.unplug_detail)
+        progressDialog?.setTitle(R.string.unplug_ok)
+        // Cancel no longer risks anything on the car side.
+        progressDialog?.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE)
+            ?.setText(R.string.btn_close)
+
+        // A buzz, so it lands even if the phone is face-down on the seat.
+        runCatching {
+            val vib = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                (getSystemService(Context.VIBRATOR_MANAGER_SERVICE)
+                    as android.os.VibratorManager).defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                getSystemService(Context.VIBRATOR_SERVICE) as android.os.Vibrator
+            }
+            vib.vibrate(android.os.VibrationEffect.createOneShot(400, 180))
+        }
+
+        android.widget.Toast.makeText(
+            this, "Safe to unplug - ECU is logging", android.widget.Toast.LENGTH_LONG
+        ).show()
+        refresh()
+    }
+
     private fun updateProgressDialog(p: SyncJob.Progress?) {
         if (p == null) return
         dlgFile?.text = "File ${p.fileIndex} of ${p.fileCount}"
@@ -388,6 +427,7 @@ class MainActivity : AppCompatActivity() {
         runCatching { progressDialog?.dismiss() }
         progressDialog = null
         dlgFile = null; dlgName = null; dlgDetail = null; dlgBar = null
+        dlgUnplug = null; dlgWarn = null
     }
 
     /** A plain-language result that stays on screen, instead of a buried log line. */

@@ -5,6 +5,22 @@
     android:orientation="vertical"
     android:padding="24dp">
 
+    <!-- Hidden during the copy phase; becomes a large green banner the moment the
+         ECU has its card back, so the owner knows they can leave the car. -->
+    <TextView
+        android:id="@+id/dlgUnplug"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="16dp"
+        android:padding="14dp"
+        android:background="#1B5E20"
+        android:textColor="#FFFFFF"
+        android:textSize="19sp"
+        android:textStyle="bold"
+        android:gravity="center"
+        android:visibility="gone"
+        android:text="@string/unplug_ok" />
+
     <TextView
         android:id="@+id/dlgFile"
         android:layout_width="match_parent"
