@@ -167,6 +167,14 @@ class MainActivity : AppCompatActivity() {
             registerReceiver(usbReceiver, filter)
         }
 
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
+                android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            // Only affects whether progress is VISIBLE in the shade; the foreground
+            // service still keeps the sync alive if this is declined.
+            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
+        }
+
         log("MiniLogSync ${appVersion()} ready")
         refresh()
         connect()
@@ -176,6 +184,14 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         dismissProgressDialog()
         try { unregisterReceiver(usbReceiver) } catch (_: Exception) {}
+        // A sync in flight owns the USB link and the card. Tearing it down here would
+        // abandon the ECU mounted and NOT LOGGING - and this ran on something as
+        // ordinary as a screen rotation. The foreground service keeps the process
+        // alive so the worker can finish and hand the card back.
+        if (runningJob != null) {
+            log("Screen closed during sync - copy continues in the background")
+            return
+        }
         io.shutdown()
         link.close()
     }
@@ -322,6 +338,7 @@ class MainActivity : AppCompatActivity() {
         refresh()
         // A big sync takes minutes; do not let the screen sleep mid-transfer.
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        SyncKeepAlive.update(this, "Starting…")
         showProgressDialog(job)
         log("=== Sync started ===")
         setMountedFlag(true)
@@ -329,11 +346,20 @@ class MainActivity : AppCompatActivity() {
             val outcome = job.run(
                 dest,
                 log = { line -> runOnUiThread { log(line) } },
-                progress = { p -> runOnUiThread { updateProgressDialog(p) } },
+                progress = { p ->
+                    if (p != null) {
+                        SyncKeepAlive.update(
+                            this, "${p.fileName}  (${p.fileIndex} of ${p.fileCount})",
+                            p.overallPercent
+                        )
+                    }
+                    runOnUiThread { updateProgressDialog(p) }
+                },
                 onSafeToUnplug = { runOnUiThread { announceSafeToUnplug() } }
             )
             runOnUiThread {
                 runningJob = null
+                SyncKeepAlive.stop(this)
                 dismissProgressDialog()
                 showSummary(outcome)
                 window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -388,6 +414,8 @@ class MainActivity : AppCompatActivity() {
     private fun announceSafeToUnplug() {
         mountedToPhone = false
         setMountedFlag(false)
+        SyncKeepAlive.update(this, "Checking copied files - the ECU is not needed",
+                             -1, safe = true)
 
         dlgUnplug?.visibility = android.view.View.VISIBLE
         dlgWarn?.setTextColor(androidx.core.content.ContextCompat.getColor(this, R.color.action_primary))
