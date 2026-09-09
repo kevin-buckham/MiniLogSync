@@ -28,6 +28,13 @@ object TsPacket {
     /** Smallest possible reply: 2 length + 1 code + 4 crc. */
     const val MIN_REPLY = 7
 
+    /**
+     * Largest reply we accept: 2 length + the 1024-byte cap declaredFrameSize allows
+     * + 4 crc. The read buffer must be at least this, or a long reply can never be
+     * assembled and a command that DID execute is reported as unanswered.
+     */
+    const val MAX_FRAME = 2 + 1024 + 4
+
     fun execute(command: String): ByteArray {
         val payload = command.toByteArray(Charsets.US_ASCII)
         val body = ByteArray(1 + payload.size)

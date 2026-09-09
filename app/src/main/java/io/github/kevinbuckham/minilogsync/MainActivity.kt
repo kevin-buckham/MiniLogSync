@@ -364,6 +364,14 @@ class MainActivity : AppCompatActivity() {
             // a recreated Activity simply reattaches to it.
             return
         }
+        // Not syncing: release the CDC port. Holding it open for the process lifetime
+        // blocked every other app (TunerStudio, CX File Explorer) from the ECU until
+        // the cable was pulled. Only do this when the Activity is really going away,
+        // not on a configuration change, or we churn the link needlessly.
+        if (isFinishing) {
+            runCatching { sharedLink?.close() }
+            sharedLink = null
+        }
     }
 
     private fun connect() {

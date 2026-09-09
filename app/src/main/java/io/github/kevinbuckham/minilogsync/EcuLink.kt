@@ -166,20 +166,35 @@ class EcuLink(private val context: Context) {
 
             p.write(TsPacket.execute(command), WRITE_TIMEOUT_MS)
 
-            val buf = ByteArray(256)
-            val chunk = ByteArray(256)
+            // Sized to the largest frame the parser will accept. At 256 bytes any
+            // reply declaring more than ~250 could never be assembled: `want` was
+            // never satisfied, the loop ran to the deadline, and a command that HAD
+            // executed was reported as unanswered - which upstream of this fed the
+            // "executed but unacked" hole that could leave the ECU mounted.
+            val buf = ByteArray(TsPacket.MAX_FRAME)
+            val chunk = ByteArray(512)
             var total = 0
+            var oversized = false
             val deadline = System.currentTimeMillis() + READ_TIMEOUT_MS
 
             while (System.currentTimeMillis() < deadline) {
                 val want = TsPacket.declaredFrameSize(buf, total)
                 if (want in 1..total) break          // whole frame present
+                if (want > buf.size) {               // cannot ever fit: say so plainly
+                    oversized = true
+                    break
+                }
                 val n = p.read(chunk, 250)
                 if (n > 0) {
                     val take = minOf(n, buf.size - total)
                     chunk.copyInto(buf, total, 0, take)
                     total += take
                 }
+            }
+            if (oversized) {
+                return Result(false, "Reply to '$command' declares more than " +
+                        "${TsPacket.MAX_FRAME} bytes - cannot verify it",
+                    TsPacket.hex(buf, minOf(total, 32)))
             }
 
             val raw = TsPacket.hex(buf, total)

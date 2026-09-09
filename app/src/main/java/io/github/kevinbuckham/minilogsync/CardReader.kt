@@ -7,7 +7,6 @@ import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import me.jahnen.libaums.core.driver.BlockDeviceDriverFactory
 import me.jahnen.libaums.core.fs.UsbFile
-import me.jahnen.libaums.core.fs.UsbFileInputStream
 import me.jahnen.libaums.core.partition.Partition
 import me.jahnen.libaums.core.partition.PartitionTableFactory
 import me.jahnen.libaums.core.usb.UsbCommunication
@@ -204,11 +203,9 @@ class CardReader(private val context: Context) {
      * stops a renamed/renumbered log being mistaken for one already copied.
      */
     fun headerStamp(file: UsbFile): Long = runCatching {
-        UsbFileInputStream(file).use { s ->
-            val probe = ByteArray(MlgTrim.PROBE_BYTES)
-            val n = readFully(s, probe, probe.size)
-            MlgTrim.timestampOf(probe, n)
-        }
+        val probe = ByteArray(MlgTrim.PROBE_BYTES)
+        val n = readAt(file, 0L, probe, 0, probe.size)
+        MlgTrim.timestampOf(probe, n)
     }.getOrDefault(0L)
 
     /** Files in the card root, excluding directories. */
@@ -216,52 +213,42 @@ class CardReader(private val context: Context) {
         root?.listFiles()?.filter { !it.isDirectory } ?: emptyList()
 
     /**
-     * Streams one file out. Returns bytes copied.
-     * [keepGoing] is polled every chunk so a cancel takes effect mid-file
-     * instead of waiting for a 32 MB log to finish.
+     * Reads up to [want] bytes at an ABSOLUTE offset. Returns bytes read; 0 at EOF.
+     *
+     * Positioned reads, not an InputStream, on purpose. This ECU drops commands, so
+     * reads must be retried - and a retry against a stream is only safe if the stream
+     * position did not advance on the failed read. (It happens not to:
+     * UsbFileInputStream advances currentByteOffset AFTER file.read returns.) Relying
+     * on that is unnecessary: re-reading a fixed offset is idempotent by construction,
+     * so a silently skipped chunk is impossible. That mattered because a skipped chunk
+     * would still pass the CRC check - the source CRC is computed from what we
+     * streamed - and on a trimmed log a block-counter discontinuity reads as a
+     * legitimate end-of-data, so the truncation would be invisible.
      */
-    fun copyTo(
-        file: UsbFile,
-        out: OutputStream,
-        keepGoing: () -> Boolean,
-        onChunk: (ByteArray, Int) -> Unit
-    ): Long {
-        val buf = ByteArray(64 * 1024)
-        var copied = 0L
-        UsbFileInputStream(file).use { stream ->
-            while (keepGoing()) {
-                // This ECU drops roughly one mass-storage command in three, so a
-                // single failed read must not be mistaken for end-of-file.
-                var n = -1
-                var attempt = 0
-                while (attempt < 5) {
-                    n = try {
-                        stream.read(buf)
-                    } catch (e: Exception) {
-                        if (attempt == 4) throw e
-                        -1
-                    }
-                    if (n >= 0) break
-                    attempt++
-                    Thread.sleep(50L * attempt)
-                }
-                if (n <= 0) break
-                out.write(buf, 0, n)
-                onChunk(buf, n)
-                copied += n
+    private fun readAt(file: UsbFile, offset: Long, buf: ByteArray, into: Int, want: Int): Int {
+        val remaining = file.length - offset
+        if (remaining <= 0L || want <= 0) return 0
+        val n = minOf(want.toLong(), remaining).toInt()
+        var attempt = 0
+        while (true) {
+            try {
+                file.read(offset, java.nio.ByteBuffer.wrap(buf, into, n))
+                return n
+            } catch (e: Exception) {
+                if (attempt >= 4) throw e      // never swallow: skipping bytes corrupts
+                attempt++
+                Thread.sleep(50L * attempt)
             }
         }
-        out.flush()
-        return copied
     }
 
     /**
      * Copy an .mlg, stopping at the end of the real data instead of dragging the
      * 32 MB of pre-allocation padding across a slow link.
      *
-     * Falls back to a plain full copy whenever anything is unexpected (not an
-     * MLG, odd header, short read) - the padding is only wasted time, whereas
-     * dropping real data would be a silent loss.
+     * Falls back to a plain full copy whenever anything is unexpected (not an MLG,
+     * odd header, short read) - the padding is only wasted time, whereas dropping
+     * real data would be a silent loss.
      *
      * @return Pair(bytesWritten, recordsKept) - recordsKept is -1 if not trimmed.
      */
@@ -271,74 +258,79 @@ class CardReader(private val context: Context) {
         keepGoing: () -> Boolean,
         onChunk: (ByteArray, Int) -> Unit
     ): Pair<Long, Int> {
-        UsbFileInputStream(file).use { stream ->
-            // --- header ---
-            val probe = ByteArray(MlgTrim.PROBE_BYTES)
-            val got = readFully(stream, probe, probe.size)
-            if (got < probe.size) {
-                emit(out, probe, got, onChunk)
-                return Pair(got.toLong(), -1)
-            }
-            val header = MlgTrim.parseHeader(probe, got)
-                ?: run {   // not an MLG: copy the rest verbatim
-                    emit(out, probe, got, onChunk)
-                    return Pair(got + drainRest(stream, out, keepGoing, onChunk), -1)
-                }
+        var pos = 0L
 
+        // --- header ---
+        val probe = ByteArray(MlgTrim.PROBE_BYTES)
+        val got = readAt(file, pos, probe, 0, probe.size)
+        pos += got
+        if (got < probe.size) {
             emit(out, probe, got, onChunk)
-            var written = got.toLong()
-
-            // rest of the header block, verbatim
-            var remainingHeader = header.dataBegin - got
-            val hbuf = ByteArray(64 * 1024)
-            while (remainingHeader > 0) {
-                if (!keepGoing()) return Pair(written, -1)
-                val want = minOf(remainingHeader, hbuf.size)
-                val n = readFully(stream, hbuf, want)
-                if (n <= 0) return Pair(written, -1)
-                emit(out, hbuf, n, onChunk)
-                written += n
-                remainingHeader -= n
+            out.flush()
+            return Pair(got.toLong(), -1)
+        }
+        val header = MlgTrim.parseHeader(probe, got)
+            ?: run {   // not an MLG: copy the rest verbatim
+                emit(out, probe, got, onChunk)
+                val rest = drainRest(file, pos, out, keepGoing, onChunk)
+                return Pair(got + rest, -1)
             }
 
-            // --- data blocks ---
-            var pending = ByteArray(0)
-            var prevCounter: Int? = null
-            var records = 0
-            val chunk = ByteArray(256 * 1024)
+        emit(out, probe, got, onChunk)
+        var written = got.toLong()
 
-            while (keepGoing()) {
-                val n = readFully(stream, chunk, chunk.size)
-                val buf = if (pending.isEmpty() && n == chunk.size) chunk
-                          else pending + chunk.copyOf(maxOf(n, 0))
-                val avail = if (pending.isEmpty() && n == chunk.size) n else pending.size + maxOf(n, 0)
+        // rest of the header block, verbatim
+        var remainingHeader = header.dataBegin - got
+        val hbuf = ByteArray(64 * 1024)
+        while (remainingHeader > 0) {
+            if (!keepGoing()) { out.flush(); return Pair(written, -1) }
+            val want = minOf(remainingHeader, hbuf.size)
+            val n = readAt(file, pos, hbuf, 0, want)
+            if (n <= 0) { out.flush(); return Pair(written, -1) }
+            pos += n
+            emit(out, hbuf, n, onChunk)
+            written += n
+            remainingHeader -= n
+        }
 
-                var off = 0
-                var stop = false
-                while (off + header.stride <= avail) {
-                    when (MlgTrim.classify(buf, off, prevCounter)) {
-                        MlgTrim.Verdict.MARKER -> {
-                            if (off + MlgTrim.MARKER_SIZE > avail) break
-                            off += MlgTrim.MARKER_SIZE
-                        }
-                        MlgTrim.Verdict.STOP -> { stop = true; break }
-                        MlgTrim.Verdict.DATA -> {
-                            prevCounter = MlgTrim.counterOf(buf, off)
-                            records++
-                            off += header.stride
-                        }
+        // --- data blocks ---
+        var pending = ByteArray(0)
+        var prevCounter: Int? = null
+        var records = 0
+        val chunk = ByteArray(256 * 1024)
+
+        while (keepGoing()) {
+            val n = readAt(file, pos, chunk, 0, chunk.size)
+            pos += n
+            val buf = if (pending.isEmpty() && n == chunk.size) chunk
+                      else pending + chunk.copyOf(maxOf(n, 0))
+            val avail = if (pending.isEmpty() && n == chunk.size) n else pending.size + maxOf(n, 0)
+
+            var off = 0
+            var stop = false
+            while (off + header.stride <= avail) {
+                when (MlgTrim.classify(buf, off, prevCounter)) {
+                    MlgTrim.Verdict.MARKER -> {
+                        if (off + MlgTrim.MARKER_SIZE > avail) break
+                        off += MlgTrim.MARKER_SIZE
+                    }
+                    MlgTrim.Verdict.STOP -> { stop = true; break }
+                    MlgTrim.Verdict.DATA -> {
+                        prevCounter = MlgTrim.counterOf(buf, off)
+                        records++
+                        off += header.stride
                     }
                 }
-
-                if (off > 0) { emit(out, buf, off, onChunk); written += off }
-                if (stop) { out.flush(); return Pair(written, records) }
-                if (n <= 0) break                      // end of file
-                pending = buf.copyOfRange(off, avail)  // partial block carried over
             }
 
-            out.flush()
-            return Pair(written, records)
+            if (off > 0) { emit(out, buf, off, onChunk); written += off }
+            if (stop) { out.flush(); return Pair(written, records) }
+            if (n <= 0) break                      // end of file
+            pending = buf.copyOfRange(off, avail)  // partial block carried over
         }
+
+        out.flush()
+        return Pair(written, records)
     }
 
     private fun emit(out: OutputStream, b: ByteArray, len: Int, onChunk: (ByteArray, Int) -> Unit) {
@@ -347,48 +339,20 @@ class CardReader(private val context: Context) {
         onChunk(b, len)
     }
 
-    /**
-     * Reads until [want] bytes or EOF.
-     *
-     * Retries only genuine EXCEPTIONS. A read returning -1 is the InputStream EOF
-     * contract, not a transient fault: retrying it five times with sleeps burned time
-     * at every legitimate end-of-file, and - worse - conflating the two meant a failed
-     * read could be skipped over, silently dropping a chunk. A dropped chunk still
-     * passes the CRC check (the source CRC is computed from what we streamed) and, on
-     * a trimmed log, reads as a legitimate end-of-data.
-     */
-    private fun readFully(stream: java.io.InputStream, buf: ByteArray, want: Int): Int {
-        var total = 0
-        while (total < want) {
-            var n = -1
-            var attempt = 0
-            while (attempt < 5) {
-                try {
-                    n = stream.read(buf, total, want - total)
-                    break                       // includes n == -1: real EOF, stop
-                } catch (e: Exception) {
-                    if (attempt == 4) throw e    // never swallow: skipping bytes corrupts
-                    attempt++
-                    Thread.sleep(50L * attempt)
-                }
-            }
-            if (n <= 0) break
-            total += n
-        }
-        return total
-    }
-
     private fun drainRest(
-        stream: java.io.InputStream,
+        file: UsbFile,
+        from: Long,
         out: OutputStream,
         keepGoing: () -> Boolean,
         onChunk: (ByteArray, Int) -> Unit
     ): Long {
         val buf = ByteArray(64 * 1024)
+        var pos = from
         var copied = 0L
         while (keepGoing()) {
-            val n = readFully(stream, buf, buf.size)
+            val n = readAt(file, pos, buf, 0, buf.size)
             if (n <= 0) break
+            pos += n
             emit(out, buf, n, onChunk)
             copied += n
         }
