@@ -127,7 +127,11 @@ class MainActivity : AppCompatActivity() {
                 override fun onReceive(c: Context, i: Intent) {
                     if (i.action != UsbManager.ACTION_USB_DEVICE_DETACHED) return
                     val prefs = app.getSharedPreferences("app", Context.MODE_PRIVATE)
-                    val mounted = prefs.getBoolean("left_mounted", false) || isSyncing
+                    // safeAnnounced: the owner has been TOLD to unplug, so a detach is
+                    // expected and must not fire the alarm - crying wolf with the single
+                    // most important warning text teaches him to ignore it.
+                    val mounted = (prefs.getBoolean("left_mounted", false) || isSyncing)
+                        && !safeAnnounced
                     emitLog("ECU detached" + if (mounted) " WHILE MOUNTED" else "")
                     if (mounted) {
                         // The ECU keeps PC mode across a cable pull (it is RAM state),
@@ -243,7 +247,18 @@ class MainActivity : AppCompatActivity() {
                 if (ok) {
                     mountedToPhone = true
                     setMountedFlag(true)
+                    // Everything built for the sync flow - the keep-alive, the detach
+                    // warning, the persisted flag - was attached to SYNC only. A manual
+                    // mount left the ECU not logging with nothing holding the process
+                    // and nothing on screen once the app was backgrounded.
+                    safeAnnounced = false
+                    acquireWakeLock(this)
+                    SyncKeepAlive.update(
+                        this, "Card is handed to the phone - THE ECU IS NOT LOGGING. "
+                            + "Tap 'Return card to ECU' before driving.", -1, safe = false
+                    )
                     log("Card handed to phone. Open Files to copy logs.")
+                    log("*** THE ECU IS NOT LOGGING until you tap 'Return card to ECU' ***")
                 }
             }
         }
@@ -253,6 +268,10 @@ class MainActivity : AppCompatActivity() {
                 if (ok) {
                     mountedToPhone = false
                     setMountedFlag(false)
+                    if (!isSyncing) {
+                        SyncKeepAlive.stop(this)
+                        releaseWakeLock()
+                    }
                     log("Card returned to ECU - logging resumed.")
                 }
             }
@@ -263,6 +282,10 @@ class MainActivity : AppCompatActivity() {
                 if (ok) {
                     mountedToPhone = false
                     setMountedFlag(false)
+                    if (!isSyncing) {
+                        SyncKeepAlive.stop(this)
+                        releaseWakeLock()
+                    }
                     log("Card explicitly assigned to ECU logging.")
                 }
             }
@@ -314,8 +337,10 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
                 android.content.pm.PackageManager.PERMISSION_GRANTED) {
-            // Only affects whether progress is VISIBLE in the shade; the foreground
-            // service still keeps the sync alive if this is declined.
+            // NOT merely cosmetic: the notification is the ONLY warning channel that
+            // survives this Activity being destroyed, and it carries "ECU LOGGING NOT
+            // CONFIRMED" and "CABLE PULLED WHILE MOUNTED". Denied, those alarms are
+            // invisible and the owner can drive away unlogged with no indication.
             requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
         }
 
@@ -339,7 +364,21 @@ class MainActivity : AppCompatActivity() {
             log("MiniLogSync ${appVersion()} ready")
         }
         refresh()
+        checkNotificationsEnabled()
         connect()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // Home button / app switch: if nothing is in flight, give the port back rather
+        // than holding it for the process lifetime.
+        if (!isSyncing && !mountedToPhone) releaseIdleLink()
+    }
+
+    private fun releaseIdleLink() {
+        if (isSyncing) return
+        runCatching { sharedLink?.close() }
+        sharedLink = null
     }
 
     override fun onDestroy() {
@@ -364,14 +403,10 @@ class MainActivity : AppCompatActivity() {
             // a recreated Activity simply reattaches to it.
             return
         }
-        // Not syncing: release the CDC port. Holding it open for the process lifetime
-        // blocked every other app (TunerStudio, CX File Explorer) from the ECU until
-        // the cable was pulled. Only do this when the Activity is really going away,
-        // not on a configuration change, or we churn the link needlessly.
-        if (isFinishing) {
-            runCatching { sharedLink?.close() }
-            sharedLink = null
-        }
+        // Not syncing: release the CDC port so other apps (TunerStudio, CX File
+        // Explorer) can reach the ECU. Guarded on isFinishing so a configuration
+        // change does not churn the link; onStop covers the common home-button case.
+        if (isFinishing) releaseIdleLink()
     }
 
     private fun connect() {
@@ -720,6 +755,19 @@ class MainActivity : AppCompatActivity() {
             else -> parts.joinToString(", ") + "\nCard returned to ECU, logging resumed."
         }
         summaryView.visibility = android.view.View.VISIBLE
+    }
+
+    /** Warn in-app if the only process-surviving alarm channel is muted. */
+    private fun checkNotificationsEnabled() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val on = runCatching {
+            (getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager)
+                .areNotificationsEnabled()
+        }.getOrDefault(true)
+        if (!on) {
+            warn("Notifications are OFF. The 'ECU NOT LOGGING' warning cannot reach you "
+                + "once this screen is closed - please enable them.")
+        }
     }
 
     private fun refresh() {

@@ -128,13 +128,18 @@ class EcuLink(private val context: Context) {
      */
     fun reopen(): String {
         lastDevice = null
-        val device = findDevice() ?: return "No ECU found to reconnect"
+        var last = "No ECU found to reconnect"
         for (attempt in 1..5) {
-            val msg = open(device)
-            if (isOpen) return msg
+            // Re-enumerate each time: during a re-enumeration findDevice() briefly
+            // returns null, and a device found before one goes stale immediately.
+            val device = findDevice()
+            if (device != null) {
+                last = open(device)
+                if (isOpen) return last
+            }
             Thread.sleep(400L * attempt)
         }
-        return "Could not reopen the serial link"
+        return last
     }
 
     /**
@@ -180,7 +185,11 @@ class EcuLink(private val context: Context) {
             while (System.currentTimeMillis() < deadline) {
                 val want = TsPacket.declaredFrameSize(buf, total)
                 if (want in 1..total) break          // whole frame present
-                if (want > buf.size) {               // cannot ever fit: say so plainly
+                // declaredFrameSize returns -1 for an over-cap length, so it can never
+                // report a size larger than the buffer - the previous version of this
+                // check was dead code. Read the raw declared length instead.
+                val declared = TsPacket.declaredLength(buf, total)
+                if (declared > 1024) {
                     oversized = true
                     break
                 }

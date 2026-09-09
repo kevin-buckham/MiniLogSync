@@ -57,6 +57,16 @@ object TsPacket {
      * consumes the WHOLE frame instead of stopping at MIN_REPLY and leaving
      * trailing bytes to contaminate the next command.
      */
+    /**
+     * The raw declared payload length, or -1 if the length field is not yet available.
+     * Unlike [declaredFrameSize] this does NOT reject implausible values, so callers
+     * can tell "reply too large to verify" apart from "reply not arrived yet".
+     */
+    fun declaredLength(buf: ByteArray, len: Int): Int {
+        if (len < 2) return -1
+        return ((buf[0].toInt() and 0xFF) shl 8) or (buf[1].toInt() and 0xFF)
+    }
+
     fun declaredFrameSize(buf: ByteArray, len: Int): Int {
         if (len < 2) return -1
         val declared = ((buf[0].toInt() and 0xFF) shl 8) or (buf[1].toInt() and 0xFF)

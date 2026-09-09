@@ -198,14 +198,47 @@ class CardReader(private val context: Context) {
     }
 
     /**
-     * Reads just the MLG header and returns its timestamp, for sync-history keying.
-     * 32 bytes per file - negligible next to a multi-megabyte copy - and it is what
-     * stops a renamed/renumbered log being mistaken for one already copied.
+     * Content stamp for sync-history keying.
+     *
+     * crc32 over the first 4 KB of DATA (at the header's dataBegin) plus the last
+     * 4 KB of the file. Two positioned reads, ~8 KB per file.
+     *
+     * NOT the MLG header timestamp: that field is 0 in all 266 logs this ECU has
+     * produced (checked against MiniRusEFI/new-logs). Keying on it collapsed history
+     * back to filename-plus-size, and size takes only a handful of values because
+     * every log is the 32 MB pre-allocation - 206 of those 266 logs share just four
+     * sizes. That is the bug this stamp exists to prevent, so the stamp was chosen by
+     * measurement: across the four big size buckets (81, 61, 48 and 16 files) this
+     * one gives a distinct value for every single file. The only files that share a
+     * stamp are six byte-identical empty logs, which the name component separates.
+     *
+     * For non-MLG files (index.txt, ltft.bin) the tail window is the whole file, so
+     * they get a real content stamp too instead of being keyed on size alone.
+     *
+     * Returns 0 only if nothing could be read at all; callers must treat 0 as
+     * "no stamp available", never as a value that matches.
      */
-    fun headerStamp(file: UsbFile): Long = runCatching {
-        val probe = ByteArray(MlgTrim.PROBE_BYTES)
-        val n = readAt(file, 0L, probe, 0, probe.size)
-        MlgTrim.timestampOf(probe, n)
+    fun contentStamp(file: UsbFile): Long = runCatching {
+        val len = file.length
+        if (len <= 0L) return 0L
+        val crc = java.util.zip.CRC32()
+        val buf = ByteArray(4096)
+        var any = false
+
+        val head = ByteArray(MlgTrim.PROBE_BYTES)
+        val hn = readAt(file, 0L, head, 0, head.size)
+        MlgTrim.parseHeader(head, hn)?.let { h ->
+            if (h.dataBegin > 0 && h.dataBegin < len) {
+                val n = readAt(file, h.dataBegin.toLong(), buf, 0, buf.size)
+                if (n > 0) { crc.update(buf, 0, n); any = true }
+            }
+        }
+
+        val tailAt = maxOf(0L, len - buf.size)
+        val n2 = readAt(file, tailAt, buf, 0, buf.size)
+        if (n2 > 0) { crc.update(buf, 0, n2); any = true }
+
+        if (any) crc.value else 0L
     }.getOrDefault(0L)
 
     /** Files in the card root, excluding directories. */

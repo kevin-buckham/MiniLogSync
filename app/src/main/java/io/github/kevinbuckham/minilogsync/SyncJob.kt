@@ -106,7 +106,7 @@ class SyncJob(
 
                 // Content stamp per file (MLG header timestamp). History keyed on name
                 // alone would classify a renumbered log as "already had" forever.
-                val stamps = files.associate { it.name to card.headerStamp(it) }
+                val stamps = files.associate { it.name to card.contentStamp(it) }
 
                 val todo = files.filter {
                     !history.isCopied(it.name, it.length, stamps[it.name] ?: 0L)

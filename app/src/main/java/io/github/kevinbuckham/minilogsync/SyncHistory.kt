@@ -53,21 +53,32 @@ class SyncHistory(context: Context) {
     }
 
     /**
-     * @param stamp content stamp (MLG header timestamp), or 0 when unavailable.
+     * @param stamp content stamp from CardReader.contentStamp, or 0 if unavailable.
+     *
+     * A stamp of 0 must NEVER fall back to size-only matching. That is precisely how
+     * the previous attempt re-created the bug it was meant to fix: it stored
+     * "size:0" for every file, took the has-a-stamp branch, and matched on size -
+     * which takes only a handful of values - while ALSO bypassing the date-name guard
+     * that the legacy path at least kept. With no usable stamp we require a filename
+     * the ECU cannot reuse.
      */
     fun isCopied(name: String, size: Long, stamp: Long): Boolean = synchronized(copied) {
         val rec = copied[name] ?: return false
-        if (rec.contains(':')) {
-            val parts = rec.split(':')
-            val recSize = parts[0].toLongOrNull() ?: return false
-            val recStamp = parts.getOrNull(1)?.toLongOrNull() ?: 0L
-            // A stamp of 0 means we could not read one (not an MLG, or a short read).
-            // Fall back to size, which is all we ever had for those files anyway.
-            return recSize == size && (stamp == 0L || recStamp == stamp)
+        val parts = rec.split(':')
+        val recSize = parts[0].toLongOrNull() ?: return false
+        if (recSize != size) return false
+
+        val recStamp = parts.getOrNull(1)?.toLongOrNull() ?: 0L
+        if (stamp != 0L && recStamp != 0L) {
+            // Both sides have a content stamp: it decides, and it is the only thing
+            // that can tell two same-named logs apart.
+            return recStamp == stamp
         }
-        // Legacy: size only. Trust it only where the name itself cannot be reused.
-        val recSize = rec.toLongOrNull() ?: return false
-        return recSize == size && datePattern.matches(name)
+        // No usable stamp on one side or the other. Name+size is safe only where the
+        // ECU cannot produce that name twice: rusEFI names logs from the RTC
+        // (re_YYMMDD_HHMMSS) but falls back to a COUNTER when the clock is unset,
+        // e.g. after a battery disconnect, and a counter name CAN come round again.
+        return datePattern.matches(name)
     }
 
     /** Only called after a copy has been verified. */

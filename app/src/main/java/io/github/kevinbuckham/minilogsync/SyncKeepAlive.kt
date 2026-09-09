@@ -71,15 +71,56 @@ class SyncKeepAlive : Service() {
         const val EXTRA_PERCENT = "pct"
         const val EXTRA_SAFE = "safe"
 
+        /**
+         * Android 12+ forbids STARTING a foreground service from the background, and
+         * USB detach is not on the exemption list. Thrown from inside a BroadcastReceiver
+         * this would crash the process - so the warning path would kill the app instead
+         * of warning, on exactly the event the warning exists for. Fall back to a plain
+         * notification, which needs no service.
+         */
         fun update(ctx: Context, text: String, percent: Int = -1, safe: Boolean = false) {
             val i = Intent(ctx, SyncKeepAlive::class.java)
                 .putExtra(EXTRA_TEXT, text)
                 .putExtra(EXTRA_PERCENT, percent)
                 .putExtra(EXTRA_SAFE, safe)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                ctx.startForegroundService(i)
-            } else {
-                ctx.startService(i)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    ctx.startForegroundService(i)
+                } else {
+                    ctx.startService(i)
+                }
+            } catch (e: Throwable) {
+                warn(ctx, text, safe)
+            }
+        }
+
+        /** Post the message as an ordinary notification - no service involved. */
+        fun warn(ctx: Context, text: String, safe: Boolean = false) {
+            runCatching {
+                val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    nm.createNotificationChannel(
+                        NotificationChannel(CHANNEL, "Log sync",
+                            NotificationManager.IMPORTANCE_HIGH)
+                    )
+                }
+                val open = PendingIntent.getActivity(
+                    ctx, 0,
+                    Intent(ctx, MainActivity::class.java)
+                        .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                )
+                nm.notify(
+                    NOTE_ID + 1,
+                    Notification.Builder(ctx, CHANNEL)
+                        .setContentTitle(if (safe) "Safe to unplug" else "MiniLogSync")
+                        .setContentText(text)
+                        .setStyle(Notification.BigTextStyle().bigText(text))
+                        .setSmallIcon(android.R.drawable.stat_notify_error)
+                        .setAutoCancel(true)
+                        .setContentIntent(open)
+                        .build()
+                )
             }
         }
 
