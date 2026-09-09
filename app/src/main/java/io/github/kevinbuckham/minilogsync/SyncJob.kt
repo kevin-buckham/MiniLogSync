@@ -36,6 +36,19 @@ class SyncJob(
     /** Set from the UI thread to stop after the current chunk. */
     val cancelled = AtomicBoolean(false)
 
+    /**
+     * When this job last made progress. A USB read can block indefinitely - a
+     * foreground service stops the process being killed but nothing stops the job
+     * itself hanging - and the notification would keep saying "Copying…", which reads
+     * as healthy while the ECU sits mounted and not logging. A watchdog outside this
+     * class polls it.
+     */
+    @Volatile
+    var lastActivityAt: Long = System.currentTimeMillis()
+        private set
+
+    private fun alive() { lastActivityAt = System.currentTimeMillis() }
+
     fun cancel() = cancelled.set(true)
 
     private fun active() = !cancelled.get()
@@ -68,6 +81,15 @@ class SyncJob(
         var skipped = 0
         var failed = 0
         val pending = mutableListOf<Pending>()
+
+        val cloud = destTree.authority?.let {
+            it.contains("docs") || it.contains("skydrive") || it.contains("dropbox")
+        } ?: false
+        if (cloud) {
+            log("NOTE: destination is a cloud provider. Verification proves the provider")
+            log("accepted the bytes, NOT that the upload finished. A local folder is")
+            log("safer (and faster); sync to the phone and let the cloud app upload.")
+        }
 
         val dest = DocumentFile.fromTreeUri(context, destTree)
         if (dest == null || !dest.canWrite()) {
@@ -117,6 +139,16 @@ class SyncJob(
                 var index = 0
 
                 for (f in files) {
+                    // Backstop for the detach broadcast: if delivery is unreliable (or
+                    // no receiver is registered), a cable pull would otherwise only
+                    // surface as a confusing I/O error part-way through a file.
+                    if (!link.isDevicePresent()) {
+                        log("*** ECU IS NO LONGER ATTACHED - stopping ***")
+                        log("The card is still assigned to the phone, so the ECU is NOT")
+                        log("LOGGING. Reconnect and tap 'Force ECU logging'.")
+                        break
+                    }
+                    alive()
                     if (!active()) {
                         log("Cancelled - $copied file(s) saved; the rest will copy next time")
                         break
@@ -202,6 +234,9 @@ class SyncJob(
             if (!p.tmp.renameTo(p.name)) {
                 log("  Could not rename ${p.name}.part - not recording")
                 false
+            } else if (!confirmPublished(dest, p)) {
+                log("  ${p.name} did not read back correctly after publishing - not recording")
+                false
             } else {
                 // Key on the CARD's size so the next sync still recognises this file.
                 history.markCopied(p.name, p.cardSize, p.stamp)
@@ -269,6 +304,7 @@ class SyncJob(
             var records = -1
             val written = context.contentResolver.openOutputStream(tmp.uri)!!.use { os ->
                 val (bytes, recs) = card.copyTrimmed(f, os, ::active) { chunk, len ->
+                    alive()
                     sourceCrc.update(chunk, 0, len)
                     soFar += len
                     val now = System.currentTimeMillis()
@@ -308,8 +344,17 @@ class SyncJob(
             }
             if (records >= 0) {
                 val saved = 100 - (written * 100 / maxOf(size, 1))
-                log("  trimmed padding: ${fmtMb(size)} -> ${fmtMb(written)} " +
-                    "($records records, $saved% less to transfer)")
+                val why = card.lastTrimReason
+                log("  trimmed: ${fmtMb(size)} -> ${fmtMb(written)} " +
+                    "($records records, $saved% less to transfer" +
+                    (if (why.isNotEmpty()) "; $why" else "") + ")")
+                // An implausibly early cut is the one way trimming could lose real
+                // data, and verification cannot see it - the source CRC is taken over
+                // the trimmed stream, so it matches its own loss. Surface it.
+                if (records in 1..49) {
+                    log("  NOTE: only $records record(s) kept from ${fmtMb(size)} - if this " +
+                        "log should be longer, check it before deleting it from the card")
+                }
             }
 
             // Verification is DEFERRED until after the ECU has its card back.
@@ -330,6 +375,22 @@ class SyncJob(
             runCatching { dest.findFile("$name.part")?.delete() }
             FileResult.FAILED
         }
+    }
+
+    /**
+     * Re-resolve the published file through a FRESH DocumentFile lookup and check its
+     * length. The read-back verification a moment earlier went through the same
+     * provider handle that buffered the write, so for a cloud destination it can be
+     * served from a local pending copy - it proves the provider ACCEPTED the bytes,
+     * not that an upload completed. This forces the provider to resolve the name
+     * again, which is as far as SAF lets us go. It is not proof of cloud durability,
+     * and the caller says so.
+     */
+    private fun confirmPublished(dest: DocumentFile, p: Pending): Boolean = try {
+        val fresh = dest.findFile(p.name)
+        fresh != null && fresh.length() == p.written
+    } catch (e: Exception) {
+        false
     }
 
     private fun fmtMb(bytes: Long): String =

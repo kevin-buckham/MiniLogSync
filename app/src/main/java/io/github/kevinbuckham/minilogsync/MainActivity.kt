@@ -89,6 +89,50 @@ class MainActivity : AppCompatActivity() {
          * dies with the Activity and was not re-applied on the reattach path.
          */
         @Volatile private var wakeLock: android.os.PowerManager.WakeLock? = null
+        @Volatile private var watchdog: Thread? = null
+
+        /**
+         * Turns a silent hang into an alarm.
+         *
+         * A USB read can block indefinitely; the foreground service keeps the process
+         * alive and the notification keeps saying "Copying…", which reads as healthy
+         * while the ECU sits mounted and NOT LOGGING. Nothing else notices - the wake
+         * lock just expires at its cap and the device sleeps.
+         */
+        fun startWatchdog(app: Context, job: SyncJob) {
+            watchdog?.interrupt()
+            val w = Thread {
+                val limitMs = 5 * 60_000L
+                try {
+                    while (runningJob === job) {
+                        Thread.sleep(30_000)
+                        if (runningJob !== job) break
+                        val idle = System.currentTimeMillis() - job.lastActivityAt
+                        if (idle > limitMs) {
+                            emitLog("*** SYNC APPEARS STUCK - no progress for " +
+                                    "${idle / 60000} minute(s) ***")
+                            emitLog("The card may still be assigned to the phone, which means")
+                            emitLog("the ECU is NOT LOGGING. Cancelling and returning the card.")
+                            SyncKeepAlive.warn(
+                                app, "Sync stuck - the ECU may NOT be logging. Open the app.",
+                                safe = false
+                            )
+                            job.cancel()
+                            break
+                        }
+                    }
+                } catch (_: InterruptedException) {
+                }
+            }
+            w.isDaemon = true
+            watchdog = w
+            w.start()
+        }
+
+        fun stopWatchdog() {
+            watchdog?.interrupt()
+            watchdog = null
+        }
 
         fun acquireWakeLock(ctx: Context) {
             if (wakeLock != null) return
@@ -564,6 +608,7 @@ class MainActivity : AppCompatActivity() {
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         safeAnnounced = false
         acquireWakeLock(this)
+        startWatchdog(applicationContext, job)
         SyncKeepAlive.update(this, "Starting…")
         showProgressDialog(job)
         log("=== Sync started ===")
@@ -607,6 +652,7 @@ class MainActivity : AppCompatActivity() {
                 outcome = SyncJob.Outcome(0, 0, 1, cancelled = true, restored = recovered)
             } finally {
                 runningJob = null
+                stopWatchdog()
             }
             val result = outcome ?: SyncJob.Outcome(0, 0, 1, cancelled = true, restored = false)
             // HIGH: stopping the service unconditionally deleted the ONLY warning

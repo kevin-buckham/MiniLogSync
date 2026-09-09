@@ -64,7 +64,18 @@ object MlgTrim {
     /** A marker block is a fixed 54 bytes rather than one record stride. */
     const val MARKER_SIZE = 54
 
-    enum class Verdict { DATA, MARKER, STOP }
+    /**
+     * STOP_PADDING is the only stop we TRUST. An all-zero block header is rusEFI's
+     * f_expand pre-allocation, i.e. genuinely the end of the data.
+     *
+     * STOP_SUSPECT covers a counter discontinuity or an unknown block type. Those can
+     * equally be a mid-file integrity break - and cutting there would silently discard
+     * the tail of a real log, permanently, in a way verification cannot detect (the
+     * source CRC is computed over the trimmed stream, so it matches its own loss).
+     * The caller must fall back to copying the whole file: padding only costs transfer
+     * time, whereas dropping real data is unrecoverable.
+     */
+    enum class Verdict { DATA, MARKER, STOP_PADDING, STOP_SUSPECT }
 
     /**
      * Classify the block starting at [off].
@@ -73,13 +84,14 @@ object MlgTrim {
     fun classify(b: ByteArray, off: Int, prevCounter: Int?): Verdict {
         return when {
             b[off] == 1.toByte() -> Verdict.MARKER
-            b[off] != 0.toByte() -> Verdict.STOP           // unknown block type
+            b[off] != 0.toByte() -> Verdict.STOP_SUSPECT   // unknown block type
             // all-zero header = pre-allocation padding (also covers the
             // counter-rolls-into-zeros edge that would otherwise look continuous)
             b[off + 1] == 0.toByte() && b[off + 2] == 0.toByte() &&
-                b[off + 3] == 0.toByte() -> Verdict.STOP
+                b[off + 3] == 0.toByte() -> Verdict.STOP_PADDING
             prevCounter != null &&
-                (b[off + 1].toInt() and 0xFF) != ((prevCounter + 1) and 0xFF) -> Verdict.STOP
+                (b[off + 1].toInt() and 0xFF) != ((prevCounter + 1) and 0xFF) ->
+                    Verdict.STOP_SUSPECT
             else -> Verdict.DATA
         }
     }

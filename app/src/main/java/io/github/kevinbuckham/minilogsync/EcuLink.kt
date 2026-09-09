@@ -126,6 +126,12 @@ class EcuLink(private val context: Context) {
      * stale and retrying it can only fail - which meant restore always failed after a
      * mid-sync re-enumeration, the one event this board is documented to produce.
      */
+    /**
+     * Is the ECU still physically attached? Enumerates rather than relying on the
+     * detach broadcast, whose delivery we do not control.
+     */
+    fun isDevicePresent(): Boolean = runCatching { findDevice() != null }.getOrDefault(false)
+
     fun reopen(): String {
         lastDevice = null
         var last = "No ECU found to reconnect"
