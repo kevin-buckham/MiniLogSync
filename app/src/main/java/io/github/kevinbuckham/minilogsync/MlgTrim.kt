@@ -47,6 +47,20 @@ object MlgTrim {
         return Header(dataBegin, recLen + 5)
     }
 
+    /**
+     * The MLG header's own timestamp (uint32 BE at offset 8), used as a CONTENT stamp
+     * so sync history cannot confuse two different logs that happen to share a name.
+     * Returns 0 when this is not an MLG or the read was short.
+     */
+    fun timestampOf(b: ByteArray, len: Int): Long {
+        if (len < 12) return 0L
+        if (b[0] != 'M'.code.toByte() || b[1] != 'L'.code.toByte() ||
+            b[2] != 'V'.code.toByte() || b[3] != 'L'.code.toByte() ||
+            b[4] != 'G'.code.toByte()
+        ) return 0L
+        return be32(b, 8).toLong() and 0xFFFFFFFFL
+    }
+
     /** A marker block is a fixed 54 bytes rather than one record stride. */
     const val MARKER_SIZE = 54
 

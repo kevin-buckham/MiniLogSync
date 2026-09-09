@@ -198,6 +198,19 @@ class CardReader(private val context: Context) {
         return null
     }
 
+    /**
+     * Reads just the MLG header and returns its timestamp, for sync-history keying.
+     * 32 bytes per file - negligible next to a multi-megabyte copy - and it is what
+     * stops a renamed/renumbered log being mistaken for one already copied.
+     */
+    fun headerStamp(file: UsbFile): Long = runCatching {
+        UsbFileInputStream(file).use { s ->
+            val probe = ByteArray(MlgTrim.PROBE_BYTES)
+            val n = readFully(s, probe, probe.size)
+            MlgTrim.timestampOf(probe, n)
+        }
+    }.getOrDefault(0L)
+
     /** Files in the card root, excluding directories. */
     fun listFiles(): List<UsbFile> =
         root?.listFiles()?.filter { !it.isDirectory } ?: emptyList()
@@ -334,20 +347,30 @@ class CardReader(private val context: Context) {
         onChunk(b, len)
     }
 
-    /** Reads until [want] bytes or EOF, retrying transient failures. */
+    /**
+     * Reads until [want] bytes or EOF.
+     *
+     * Retries only genuine EXCEPTIONS. A read returning -1 is the InputStream EOF
+     * contract, not a transient fault: retrying it five times with sleeps burned time
+     * at every legitimate end-of-file, and - worse - conflating the two meant a failed
+     * read could be skipped over, silently dropping a chunk. A dropped chunk still
+     * passes the CRC check (the source CRC is computed from what we streamed) and, on
+     * a trimmed log, reads as a legitimate end-of-data.
+     */
     private fun readFully(stream: java.io.InputStream, buf: ByteArray, want: Int): Int {
         var total = 0
         while (total < want) {
             var n = -1
             var attempt = 0
             while (attempt < 5) {
-                n = try { stream.read(buf, total, want - total) } catch (e: Exception) {
-                    if (attempt == 4) throw e
-                    -1
+                try {
+                    n = stream.read(buf, total, want - total)
+                    break                       // includes n == -1: real EOF, stop
+                } catch (e: Exception) {
+                    if (attempt == 4) throw e    // never swallow: skipping bytes corrupts
+                    attempt++
+                    Thread.sleep(50L * attempt)
                 }
-                if (n >= 0) break
-                attempt++
-                Thread.sleep(50L * attempt)
             }
             if (n <= 0) break
             total += n

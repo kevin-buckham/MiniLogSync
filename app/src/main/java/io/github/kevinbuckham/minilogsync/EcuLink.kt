@@ -120,8 +120,15 @@ class EcuLink(private val context: Context) {
     fun releaseForStorage() = close()
 
     /** Re-acquire the serial link after the storage phase, so we can restore logging. */
+    /**
+     * Re-open after the link was released. Re-enumerates rather than trusting
+     * lastDevice: if the ECU reset or the cable was re-seated, the cached UsbDevice is
+     * stale and retrying it can only fail - which meant restore always failed after a
+     * mid-sync re-enumeration, the one event this board is documented to produce.
+     */
     fun reopen(): String {
-        val device = lastDevice ?: findDevice() ?: return "No ECU found to reconnect"
+        lastDevice = null
+        val device = findDevice() ?: return "No ECU found to reconnect"
         for (attempt in 1..5) {
             val msg = open(device)
             if (isOpen) return msg

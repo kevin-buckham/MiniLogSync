@@ -77,8 +77,16 @@ class SyncJob(
 
         val mount = link.sendCommand(EcuLink.CMD_MOUNT_PHONE)
         if (!mount.ok) {
-            log("Mount failed: ${mount.message}")
-            return Outcome(0, 0, 0, cancelled.get(), restored = true)  // never mounted
+            // DO NOT assume "no reply" means "did not execute". This ECU drops roughly
+            // one command in three, and a lost ACK is indistinguishable from a lost
+            // command - the write may well have landed, leaving the card mounted and
+            // the ECU NOT LOGGING. Treating this as "never mounted" cleared the
+            // left_mounted flag, disarmed the heal and told the owner logging had
+            // resumed: every defense switched off by the exact failure they exist for.
+            log("Mount was not acknowledged: ${mount.message}")
+            log("The command may still have executed - assuming the card COULD be mounted.")
+            val restored = restoreLogging(log)
+            return Outcome(0, 0, 0, cancelled.get(), restored = restored)
         }
         log("Card mounted; ECU is not logging")
 
@@ -96,7 +104,13 @@ class SyncJob(
                 val files = card.listFiles().sortedBy { it.name }
                 log("Card has ${files.size} files")
 
-                val todo = files.filter { !history.isCopied(it.name, it.length) }
+                // Content stamp per file (MLG header timestamp). History keyed on name
+                // alone would classify a renumbered log as "already had" forever.
+                val stamps = files.associate { it.name to card.headerStamp(it) }
+
+                val todo = files.filter {
+                    !history.isCopied(it.name, it.length, stamps[it.name] ?: 0L)
+                }
                 val totalBytes = todo.sumOf { it.length }
                 log("${todo.size} new file(s), ${fmtMb(totalBytes)} to copy")
                 var doneBytes = 0L
@@ -107,10 +121,10 @@ class SyncJob(
                         log("Cancelled - $copied file(s) saved; the rest will copy next time")
                         break
                     }
-                    val isNew = !history.isCopied(f.name, f.length)
+                    val isNew = !history.isCopied(f.name, f.length, stamps[f.name] ?: 0L)
                     if (isNew) index++
                     when (copyOne(card, f, dest, log, index, todo.size, doneBytes, totalBytes,
-                                  progress, pending)) {
+                                  progress, pending, stamps[f.name] ?: 0L)) {
                         FileResult.COPIED -> doneBytes += f.length
                         FileResult.SKIPPED -> skipped++
                         FileResult.FAILED -> failed++
@@ -169,7 +183,8 @@ class SyncJob(
         val name: String,
         val cardSize: Long,
         val written: Long,
-        val crc: Long
+        val crc: Long,
+        val stamp: Long
     )
 
     /**
@@ -189,7 +204,7 @@ class SyncJob(
                 false
             } else {
                 // Key on the CARD's size so the next sync still recognises this file.
-                history.markCopied(p.name, p.cardSize)
+                history.markCopied(p.name, p.cardSize, p.stamp)
                 true
             }
         }
@@ -228,12 +243,13 @@ class SyncJob(
         bytesBefore: Long,
         bytesTotal: Long,
         progress: (Progress?) -> Unit,
-        pending: MutableList<Pending>
+        pending: MutableList<Pending>,
+        stamp: Long
     ): FileResult {
         val name = f.name
         val size = f.length
 
-        if (history.isCopied(name, size)) return FileResult.SKIPPED
+        if (history.isCopied(name, size, stamp)) return FileResult.SKIPPED
 
         // Guard the WHOLE per-file operation: a provider that throws on rename
         // must not abort the remaining files.
@@ -305,7 +321,8 @@ class SyncJob(
                 name = name,
                 cardSize = size,          // key history on the CARD size, not the trimmed size
                 written = written,
-                crc = sourceCrc.value
+                crc = sourceCrc.value,
+                stamp = stamp
             )
             FileResult.COPIED
         } catch (e: Exception) {

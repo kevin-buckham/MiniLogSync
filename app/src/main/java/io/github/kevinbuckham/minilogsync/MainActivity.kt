@@ -27,7 +27,7 @@ import java.util.concurrent.Executors
  */
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var history: SyncHistory
+
     private lateinit var prefs: SharedPreferences
     private lateinit var statusView: TextView
     private lateinit var logView: TextView
@@ -58,6 +58,10 @@ class MainActivity : AppCompatActivity() {
          * by a process that is gone (heal is correct).
          */
         @Volatile private var sharedLink: EcuLink? = null
+        @Volatile private var sharedHistory: SyncHistory? = null
+
+        fun historyFor(ctx: Context): SyncHistory =
+            sharedHistory ?: SyncHistory(ctx.applicationContext).also { sharedHistory = it }
         private val io = Executors.newSingleThreadExecutor()
         @Volatile private var runningJob: SyncJob? = null
 
@@ -74,12 +78,86 @@ class MainActivity : AppCompatActivity() {
         @Volatile private var uiProgress: ((SyncJob.Progress?) -> Unit)? = null
         @Volatile private var lastProgress: SyncJob.Progress? = null
         @Volatile private var uiSafeToUnplug: (() -> Unit)? = null
+        @Volatile private var uiOutcome: ((SyncJob.Outcome) -> Unit)? = null
         @Volatile private var safeAnnounced = false
 
-        private val logStamp = SimpleDateFormat("HH:mm:ss", Locale.US)
+        /**
+         * A foreground service stops the PROCESS being killed; it does not stop the
+         * DEVICE suspending. With the screen off and no wake lock, USB bulk transfers
+         * stall and the sync hangs - for hours - with the card still handed to the
+         * phone and the ECU not logging. FLAG_KEEP_SCREEN_ON was no substitute: it
+         * dies with the Activity and was not re-applied on the reattach path.
+         */
+        @Volatile private var wakeLock: android.os.PowerManager.WakeLock? = null
+
+        fun acquireWakeLock(ctx: Context) {
+            if (wakeLock != null) return
+            runCatching {
+                val pm = ctx.applicationContext
+                    .getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+                wakeLock = pm.newWakeLock(
+                    android.os.PowerManager.PARTIAL_WAKE_LOCK, "MiniLogSync:sync"
+                ).apply {
+                    setReferenceCounted(false)
+                    acquire(45 * 60 * 1000L)   // hard cap: a hang must not hold it forever
+                }
+            }
+        }
+
+        fun releaseWakeLock() {
+            runCatching { wakeLock?.takeIf { it.isHeld }?.release() }
+            wakeLock = null
+        }
+
+        /**
+         * Detach is registered at PROCESS scope, not on the Activity.
+         *
+         * The receiver used to live and die with the Activity while the job is
+         * process-scoped, so a cable pull or ECU reset arriving with no Activity alive
+         * was seen by nobody - the same "process-scoped work, Activity-scoped event
+         * handling" split that caused the last three bugs. Detach is the one that can
+         * silently cost a whole unlogged drive, so it gets its own permanent receiver.
+         */
+        @Volatile private var detachReceiver: BroadcastReceiver? = null
+
+        fun ensureDetachReceiver(ctx: Context) {
+            if (detachReceiver != null) return
+            val app = ctx.applicationContext
+            val r = object : BroadcastReceiver() {
+                override fun onReceive(c: Context, i: Intent) {
+                    if (i.action != UsbManager.ACTION_USB_DEVICE_DETACHED) return
+                    val prefs = app.getSharedPreferences("app", Context.MODE_PRIVATE)
+                    val mounted = prefs.getBoolean("left_mounted", false) || isSyncing
+                    emitLog("ECU detached" + if (mounted) " WHILE MOUNTED" else "")
+                    if (mounted) {
+                        // The ECU keeps PC mode across a cable pull (it is RAM state),
+                        // so it is not logging and we cannot tell it anything now.
+                        prefs.edit().putBoolean("left_mounted", true).apply()
+                        SyncKeepAlive.update(
+                            app, "CABLE PULLED WHILE MOUNTED - the ECU is NOT LOGGING. "
+                                + "Reconnect and tap 'Force ECU logging'.", -1, safe = false
+                        )
+                    }
+                }
+            }
+            val f = IntentFilter(UsbManager.ACTION_USB_DEVICE_DETACHED)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                app.registerReceiver(r, f, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
+                app.registerReceiver(r, f)
+            }
+            detachReceiver = r
+        }
+
+        // SimpleDateFormat is not thread-safe and emitLog runs on both the io thread
+        // (job callbacks) and the main thread (UI logging).
+        private val logStamp = ThreadLocal.withInitial {
+            SimpleDateFormat("HH:mm:ss", Locale.US)
+        }
 
         fun emitLog(line: String) {
-            val entry = "${logStamp.format(Date())}  $line"
+            val entry = "${logStamp.get()!!.format(Date())}  $line"
             synchronized(logBuffer) {
                 logBuffer.addFirst(entry)
                 while (logBuffer.size > LOG_MAX) logBuffer.removeLast()
@@ -100,6 +178,16 @@ class MainActivity : AppCompatActivity() {
 
     /** Process-scoped so it survives Activity recreation mid-sync. */
     private val link: EcuLink get() = linkFor(this)
+
+    /** Process-scoped: a per-Activity copy diverged from the running job's. */
+    private val history: SyncHistory get() = historyFor(this)
+
+    // This instance's sink lambdas, kept so onDestroy can tell whether it still owns
+    // the process-scoped slots before clearing them.
+    private var myLog: ((String) -> Unit)? = null
+    private var myProgress: ((SyncJob.Progress?) -> Unit)? = null
+    private var mySafe: (() -> Unit)? = null
+    private var myOutcome: ((SyncJob.Outcome) -> Unit)? = null
 
     private var progressDialog: androidx.appcompat.app.AlertDialog? = null
     private var dlgFile: TextView? = null
@@ -139,7 +227,6 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        history = SyncHistory(this)
         prefs = getSharedPreferences("app", Context.MODE_PRIVATE)
         // Recreated mid-sync: the card really is handed to the phone, so show it.
         mountedToPhone = prefs.getBoolean("left_mounted", false)
@@ -232,9 +319,15 @@ class MainActivity : AppCompatActivity() {
             requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
         }
 
-        uiLog = { entry -> runOnUiThread { appendToView(entry) } }
-        uiProgress = { p -> runOnUiThread { updateProgressDialog(p) } }
-        uiSafeToUnplug = { runOnUiThread { announceSafeToUnplug() } }
+        myLog = { entry -> runOnUiThread { appendToView(entry) } }
+        myProgress = { p -> runOnUiThread { updateProgressDialog(p) } }
+        mySafe = { runOnUiThread { announceSafeToUnplug() } }
+        myOutcome = { o -> runOnUiThread { onSyncFinished(o) } }
+        uiLog = myLog
+        uiProgress = myProgress
+        uiSafeToUnplug = mySafe
+        uiOutcome = myOutcome
+        ensureDetachReceiver(this)
 
         restoreLog()
         if (isSyncing) {
@@ -259,9 +352,13 @@ class MainActivity : AppCompatActivity() {
         // alive so the worker can finish and hand the card back.
         // Drop the UI sinks either way: they point at views that are now dead. The
         // job keeps running and the next Activity re-registers.
-        uiLog = null
-        uiProgress = null
-        uiSafeToUnplug = null
+        // Only clear sinks we still own: a deferred onDestroy from the OLD instance
+        // could otherwise null the sinks the NEW one just registered, reproducing the
+        // frozen-dialog symptom these sinks exist to prevent.
+        if (uiLog === myLog) uiLog = null
+        if (uiProgress === myProgress) uiProgress = null
+        if (uiSafeToUnplug === mySafe) uiSafeToUnplug = null
+        if (uiOutcome === myOutcome) uiOutcome = null
         if (isSyncing) {
             // Link, worker and job are process-scoped now, so the copy carries on and
             // a recreated Activity simply reattaches to it.
@@ -416,27 +513,35 @@ class MainActivity : AppCompatActivity() {
         val dest = destinationUri()
         if (dest == null) { log("Pick a destination folder first"); return }
 
-        val job = SyncJob(this, link, history)
+        val job = SyncJob(applicationContext, link, history)
         runningJob = job
         mountedToPhone = true
         refresh()
         // A big sync takes minutes; do not let the screen sleep mid-transfer.
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         safeAnnounced = false
+        acquireWakeLock(this)
         SyncKeepAlive.update(this, "Starting…")
         showProgressDialog(job)
         log("=== Sync started ===")
         setMountedFlag(true)
         io.execute {
             val app = applicationContext
-            val outcome = job.run(
+            // isSyncing is process-scoped now, so a throw escaping here would wedge it
+            // true for the process lifetime - disabling SYNC, connect() and, worst,
+            // healIfLeftMounted(). The app would then actively refuse to hand the card
+            // back until force-stopped. Throwable, not Exception: OOM is reachable
+            // because the copy path allocates per chunk.
+            var outcome: SyncJob.Outcome? = null
+            try {
+                outcome = job.run(
                 dest,
                 log = { line -> emitLog(line) },
                 progress = { p ->
                     if (p != null) {
                         SyncKeepAlive.update(
                             app, "${p.fileName}  (${p.fileIndex} of ${p.fileCount})",
-                            p.overallPercent
+                            p.overallPercent, safe = safeAnnounced
                         )
                     }
                     emitProgress(p)
@@ -447,29 +552,64 @@ class MainActivity : AppCompatActivity() {
                                          -1, safe = true)
                     uiSafeToUnplug?.invoke()
                 }
-            )
-            runOnUiThread {
-                runningJob = null
-                SyncKeepAlive.stop(this)
-                dismissProgressDialog()
-                showSummary(outcome)
-                window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                // Only clear the "not logging" state if the ECU actually confirmed
-                // it took the card back. Never tell the owner it is safe to drive
-                // away on an assumption - that is how a whole drive goes unlogged.
-                mountedToPhone = !outcome.restored
-                setMountedFlag(!outcome.restored)
-                log(
-                    when {
-                        !outcome.restored -> "=== FINISHED, BUT ECU LOGGING NOT CONFIRMED - see warning above ==="
-                        outcome.cancelled -> "=== Sync cancelled; logging resumed, safe to unplug ==="
-                        outcome.clean -> "=== Sync complete; logging resumed ==="
-                        else -> "=== Sync finished with problems; logging resumed ==="
-                    }
                 )
-                refresh()
+            } catch (t: Throwable) {
+                emitLog("SYNC CRASHED: ${t.javaClass.simpleName}: ${t.message}")
+                // The card may still be handed to the phone. Try to give it back,
+                // because nothing else will.
+                emitLog("Attempting to return the card to the ECU…")
+                val recovered = runCatching {
+                    link.sendCommand(EcuLink.CMD_RESTORE_AUTO, attempts = 4).ok
+                }.getOrDefault(false)
+                outcome = SyncJob.Outcome(0, 0, 1, cancelled = true, restored = recovered)
+            } finally {
+                runningJob = null
             }
+            val result = outcome ?: SyncJob.Outcome(0, 0, 1, cancelled = true, restored = false)
+            // HIGH: stopping the service unconditionally deleted the ONLY warning
+            // channel that survives Activity death. If logging was not confirmed the
+            // notification must STAY, saying so - otherwise the progress notification
+            // just vanishes, which reads as success, and the owner drives away with the
+            // ECU mounted and not logging.
+            if (result.restored) {
+                SyncKeepAlive.stop(app)
+            } else {
+                SyncKeepAlive.update(
+                    app, "ECU LOGGING NOT CONFIRMED - reopen the app and tap "
+                        + "'Force ECU logging' before driving", -1, safe = false
+                )
+            }
+            releaseWakeLock()
+
+            // Persist the mounted state from the worker, so it is correct even if no
+            // Activity is alive to receive the callback below.
+            getSharedPreferences("app", Context.MODE_PRIVATE).edit()
+                .putBoolean("left_mounted", !result.restored).apply()
+            emitLog(
+                when {
+                    !result.restored -> "=== FINISHED, BUT ECU LOGGING NOT CONFIRMED - see warning above ==="
+                    result.cancelled -> "=== Sync cancelled; logging resumed, safe to unplug ==="
+                    result.clean -> "=== Sync complete; logging resumed ==="
+                    else -> "=== Sync finished with problems; logging resumed ==="
+                }
+            )
+            // Delivered through the sink so it lands on the CURRENT Activity. Sent to
+            // the launching instance, a recreated Activity was left with a modal
+            // "syncing" dialog nobody ever dismissed, indistinguishable from a hang.
+            uiOutcome?.invoke(result)
         }
+    }
+
+    /** Runs on whichever Activity is alive when the sync finishes. */
+    private fun onSyncFinished(result: SyncJob.Outcome) {
+        dismissProgressDialog()
+        showSummary(result)
+        window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // Only clear the "not logging" state if the ECU actually confirmed it took the
+        // card back. Never tell the owner it is safe to drive away on an assumption -
+        // that is how a whole drive goes unlogged.
+        mountedToPhone = !result.restored
+        refresh()
     }
 
     private fun showProgressDialog(job: SyncJob) {
@@ -486,8 +626,15 @@ class MainActivity : AppCompatActivity() {
             .setView(view)
             .setCancelable(false)                       // no accidental dismissal mid-transfer
             .setNegativeButton(R.string.btn_cancel) { _, _ ->
-                job.cancel()
-                log("Cancelling after the current chunk...")
+                // Once the card is back with the ECU, this button is just "close" -
+                // cancelling then reported a fully successful sync as "cancelled",
+                // which teaches the owner to distrust the summary.
+                if (safeAnnounced) {
+                    log("Closed - verification continues in the background")
+                } else {
+                    job.cancel()
+                    log("Cancelling after the current chunk...")
+                }
             }
             .create()
 
