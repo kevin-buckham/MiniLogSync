@@ -27,7 +27,6 @@ import java.util.concurrent.Executors
  */
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var link: EcuLink
     private lateinit var history: SyncHistory
     private lateinit var prefs: SharedPreferences
     private lateinit var statusView: TextView
@@ -36,14 +35,71 @@ class MainActivity : AppCompatActivity() {
     private lateinit var destView: TextView
     private lateinit var summaryView: TextView
 
-    private val io = Executors.newSingleThreadExecutor()
     private val stamp = SimpleDateFormat("HH:mm:ss", Locale.US)
 
     /** True while the card is handed to the phone - the ECU is NOT logging. */
     private var mountedToPhone = false
 
-    /** Non-null while a sync is running. */
-    private var runningJob: SyncJob? = null
+    companion object {
+        /**
+         * The USB link, the worker and the running job live at PROCESS scope, not on
+         * the Activity.
+         *
+         * Android destroys and recreates a backgrounded Activity freely. When these
+         * were Activity-owned, coming back after a couple of minutes - or simply
+         * tapping the progress notification - built a second MainActivity whose
+         * onCreate ran healIfLeftMounted(), saw the left_mounted flag that the RUNNING
+         * sync had set, and sent `sdmode auto`. The ECU took its card back mid-copy
+         * and the transfer died. Returning within a few seconds only resumed the
+         * Activity, so it survived - which is exactly the reported symptom.
+         *
+         * Process scope also means the flag below distinguishes the two cases that
+         * matter: a sync live in THIS process (never heal) versus a flag left behind
+         * by a process that is gone (heal is correct).
+         */
+        @Volatile private var sharedLink: EcuLink? = null
+        private val io = Executors.newSingleThreadExecutor()
+        @Volatile private var runningJob: SyncJob? = null
+
+        /** Last lines of the log, so Activity recreation does not lose the history. */
+        private val logBuffer = ArrayDeque<String>()
+        private const val LOG_MAX = 400
+
+        /**
+         * The running job writes into these sinks rather than capturing an Activity.
+         * A recreated Activity re-registers and picks the sync up live; without this,
+         * reattaching would show a frozen dialog and a dead log.
+         */
+        @Volatile private var uiLog: ((String) -> Unit)? = null
+        @Volatile private var uiProgress: ((SyncJob.Progress?) -> Unit)? = null
+        @Volatile private var lastProgress: SyncJob.Progress? = null
+        @Volatile private var uiSafeToUnplug: (() -> Unit)? = null
+        @Volatile private var safeAnnounced = false
+
+        private val logStamp = SimpleDateFormat("HH:mm:ss", Locale.US)
+
+        fun emitLog(line: String) {
+            val entry = "${logStamp.format(Date())}  $line"
+            synchronized(logBuffer) {
+                logBuffer.addFirst(entry)
+                while (logBuffer.size > LOG_MAX) logBuffer.removeLast()
+            }
+            uiLog?.invoke(entry)
+        }
+
+        fun emitProgress(p: SyncJob.Progress?) {
+            lastProgress = p
+            uiProgress?.invoke(p)
+        }
+
+        val isSyncing: Boolean get() = runningJob != null
+
+        fun linkFor(ctx: Context): EcuLink =
+            sharedLink ?: EcuLink(ctx.applicationContext).also { sharedLink = it }
+    }
+
+    /** Process-scoped so it survives Activity recreation mid-sync. */
+    private val link: EcuLink get() = linkFor(this)
 
     private var progressDialog: androidx.appcompat.app.AlertDialog? = null
     private var dlgFile: TextView? = null
@@ -83,9 +139,10 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        link = EcuLink(this)
         history = SyncHistory(this)
         prefs = getSharedPreferences("app", Context.MODE_PRIVATE)
+        // Recreated mid-sync: the card really is handed to the phone, so show it.
+        mountedToPhone = prefs.getBoolean("left_mounted", false)
         statusView = findViewById(R.id.status)
         logView = findViewById(R.id.log)
         warnView = findViewById(R.id.warning)
@@ -175,7 +232,19 @@ class MainActivity : AppCompatActivity() {
             requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
         }
 
-        log("MiniLogSync ${appVersion()} ready")
+        uiLog = { entry -> runOnUiThread { appendToView(entry) } }
+        uiProgress = { p -> runOnUiThread { updateProgressDialog(p) } }
+        uiSafeToUnplug = { runOnUiThread { announceSafeToUnplug() } }
+
+        restoreLog()
+        if (isSyncing) {
+            log("Reattached to a sync already in progress")
+            showProgressDialog(runningJob!!)
+            if (safeAnnounced) announceSafeToUnplug()
+            lastProgress?.let { updateProgressDialog(it) }
+        } else {
+            log("MiniLogSync ${appVersion()} ready")
+        }
         refresh()
         connect()
     }
@@ -188,15 +257,24 @@ class MainActivity : AppCompatActivity() {
         // abandon the ECU mounted and NOT LOGGING - and this ran on something as
         // ordinary as a screen rotation. The foreground service keeps the process
         // alive so the worker can finish and hand the card back.
-        if (runningJob != null) {
-            log("Screen closed during sync - copy continues in the background")
+        // Drop the UI sinks either way: they point at views that are now dead. The
+        // job keeps running and the next Activity re-registers.
+        uiLog = null
+        uiProgress = null
+        uiSafeToUnplug = null
+        if (isSyncing) {
+            // Link, worker and job are process-scoped now, so the copy carries on and
+            // a recreated Activity simply reattaches to it.
             return
         }
-        io.shutdown()
-        link.close()
     }
 
     private fun connect() {
+        if (isSyncing) {
+            log("Sync already running - not reconnecting")
+            refresh()
+            return
+        }
         val device = link.findDevice()
         if (device == null) {
             statusView.text = getString(R.string.status_no_device)
@@ -309,6 +387,12 @@ class MainActivity : AppCompatActivity() {
      * (crash, process kill, battery death, cable yank), put it right now.
      */
     private fun healIfLeftMounted() {
+        if (isSyncing) {
+            // The flag is set BY the running sync. Healing here would send
+            // `sdmode auto` and yank the card out from under the copy in progress.
+            log("Sync in progress - reattached to it")
+            return
+        }
         if (!prefs.getBoolean("left_mounted", false)) return
         log("Previous session may have left the ECU not logging - restoring...")
         io.execute {
@@ -338,24 +422,31 @@ class MainActivity : AppCompatActivity() {
         refresh()
         // A big sync takes minutes; do not let the screen sleep mid-transfer.
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        safeAnnounced = false
         SyncKeepAlive.update(this, "Starting…")
         showProgressDialog(job)
         log("=== Sync started ===")
         setMountedFlag(true)
         io.execute {
+            val app = applicationContext
             val outcome = job.run(
                 dest,
-                log = { line -> runOnUiThread { log(line) } },
+                log = { line -> emitLog(line) },
                 progress = { p ->
                     if (p != null) {
                         SyncKeepAlive.update(
-                            this, "${p.fileName}  (${p.fileIndex} of ${p.fileCount})",
+                            app, "${p.fileName}  (${p.fileIndex} of ${p.fileCount})",
                             p.overallPercent
                         )
                     }
-                    runOnUiThread { updateProgressDialog(p) }
+                    emitProgress(p)
                 },
-                onSafeToUnplug = { runOnUiThread { announceSafeToUnplug() } }
+                onSafeToUnplug = {
+                    safeAnnounced = true
+                    SyncKeepAlive.update(app, "Checking copied files - the ECU is not needed",
+                                         -1, safe = true)
+                    uiSafeToUnplug?.invoke()
+                }
             )
             runOnUiThread {
                 runningJob = null
@@ -414,8 +505,6 @@ class MainActivity : AppCompatActivity() {
     private fun announceSafeToUnplug() {
         mountedToPhone = false
         setMountedFlag(false)
-        SyncKeepAlive.update(this, "Checking copied files - the ECU is not needed",
-                             -1, safe = true)
 
         dlgUnplug?.visibility = android.view.View.VISIBLE
         dlgWarn?.setTextColor(androidx.core.content.ContextCompat.getColor(this, R.color.action_primary))
@@ -499,7 +588,15 @@ class MainActivity : AppCompatActivity() {
         log(text)
     }
 
-    private fun log(line: String) {
-        logView.text = "${stamp.format(Date())}  $line\n${logView.text}"
+    private fun log(line: String) = emitLog(line)
+
+    private fun appendToView(entry: String) {
+        logView.text = "$entry\n${logView.text}"
+    }
+
+    /** Repaint the log after the Activity has been recreated. */
+    private fun restoreLog() {
+        val text = synchronized(logBuffer) { logBuffer.joinToString("\n") }
+        if (text.isNotEmpty()) logView.text = text
     }
 }

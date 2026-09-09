@@ -44,7 +44,13 @@ class SyncKeepAlive : Service() {
             )
         }
         val open = PendingIntent.getActivity(
-            this, 0, Intent(this, MainActivity::class.java),
+            this, 0,
+            Intent(this, MainActivity::class.java).addFlags(
+                // Resume the existing Activity. Without SINGLE_TOP, tapping the
+                // notification built a NEW MainActivity whose onCreate healed the
+                // left_mounted flag and killed the running sync.
+                Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            ),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
         val b = Notification.Builder(this, CHANNEL)

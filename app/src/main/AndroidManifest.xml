@@ -14,6 +14,7 @@
         android:theme="@style/Theme.AppCompat.DayNight.NoActionBar">
 
         <activity
+            android:launchMode="singleTop"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density"
             android:name=".MainActivity"
             android:exported="true"
