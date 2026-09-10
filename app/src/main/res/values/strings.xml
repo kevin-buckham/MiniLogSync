@@ -28,4 +28,6 @@
     <string name="unplug_ok">\u2713 SAFE TO UNPLUG\nThe ECU has its card back and is logging.</string>
     <string name="unplug_detail">You can leave. Finishing the file check on the phone \u2013 the ECU is not needed for this.</string>
     <string name="btn_close">CLOSE</string>
+    <string name="btn_hide">HIDE</string>
+    <string name="btn_show_progress">SHOW PROGRESS</string>
 </resources>

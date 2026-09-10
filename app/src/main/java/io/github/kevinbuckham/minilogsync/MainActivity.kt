@@ -204,12 +204,29 @@ class MainActivity : AppCompatActivity() {
             SimpleDateFormat("HH:mm:ss", Locale.US)
         }
 
+        @Volatile private var logFile: java.io.File? = null
+
+        /** Called once so emitLog can persist without needing a Context each time. */
+        fun initLogFile(ctx: Context) {
+            if (logFile != null) return
+            runCatching {
+                val f = java.io.File(ctx.applicationContext.getExternalFilesDir(null),
+                                     "minilogsync.log")
+                if (f.exists() && f.length() > 1_000_000L) f.delete()   // simple rotation
+                logFile = f
+            }
+        }
+
         fun emitLog(line: String) {
             val entry = "${logStamp.get()!!.format(Date())}  $line"
             synchronized(logBuffer) {
                 logBuffer.addFirst(entry)
                 while (logBuffer.size > LOG_MAX) logBuffer.removeLast()
             }
+            // On disk too: the in-memory buffer dies with the process, and a force-stop
+            // is exactly what the owner does when a sync appears stuck - destroying the
+            // only record of why.
+            runCatching { logFile?.appendText(entry + "\n") }
             uiLog?.invoke(entry)
         }
 
@@ -338,12 +355,25 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnDest).setOnClickListener { pickDestination.launch(null) }
 
         findViewById<Button>(R.id.btnSync).setOnClickListener {
-            if (runningJob == null) startSync()
+            val job = runningJob
+            if (job == null) {
+                startSync()
+            } else if (progressDialog == null) {
+                showProgressDialog(job)                 // re-open after HIDE
+                lastProgress?.let { updateProgressDialog(it) }
+            }
         }
 
         selectTab(sync = true)
         findViewById<Button>(R.id.tabSync).setOnClickListener { selectTab(sync = true) }
         findViewById<Button>(R.id.tabLog).setOnClickListener { selectTab(sync = false) }
+
+        findViewById<Button>(R.id.btnCopyLog).setOnLongClickListener {
+            val f = java.io.File(getExternalFilesDir(null), "minilogsync.log")
+            log(if (f.exists()) "Full log on disk: ${f.absolutePath} (${f.length() / 1024} kB)"
+                else "No on-disk log yet")
+            true
+        }
 
         findViewById<Button>(R.id.btnCopyLog).setOnClickListener {
             val cm = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
@@ -398,6 +428,7 @@ class MainActivity : AppCompatActivity() {
         uiOutcome = myOutcome
         ensureDetachReceiver(this)
 
+        initLogFile(this)
         restoreLog()
         if (isSyncing) {
             log("Reattached to a sync already in progress")
@@ -713,7 +744,15 @@ class MainActivity : AppCompatActivity() {
         val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle(R.string.dlg_title)
             .setView(view)
-            .setCancelable(false)                       // no accidental dismissal mid-transfer
+            // Dismissible on purpose. It used to be setCancelable(false) with only a
+            // CANCEL button, so while a sync was stuck the owner could not reach the
+            // Log tab, and the only way out ALSO destroyed the evidence. Hiding leaves
+            // the sync running - progress stays in the notification and the status line.
+            .setCancelable(true)
+            .setNeutralButton(R.string.btn_hide) { d, _ ->
+                d.dismiss()
+                log("Progress hidden - the sync is still running. Tap SHOW PROGRESS to return.")
+            }
             .setNegativeButton(R.string.btn_cancel) { _, _ ->
                 // Once the card is back with the ECU, this button is just "close" -
                 // cancelling then reported a fully successful sync as "cancelled",
@@ -770,6 +809,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateProgressDialog(p: SyncJob.Progress?) {
         if (p == null) return
+        // Also on the main screen, so hiding the dialog does not hide progress.
+        statusView.text = "Syncing ${p.overallPercent}%  -  file ${p.fileIndex} of " +
+            "${p.fileCount}\nbuild ${appVersion()}"
         dlgFile?.text = "File ${p.fileIndex} of ${p.fileCount}"
         dlgName?.text = p.fileName
         dlgDetail?.text = p.detail
@@ -819,7 +861,10 @@ class MainActivity : AppCompatActivity() {
     private fun refresh() {
         destView.text = destinationUri()?.let { "Saving to: ${prettyDest(it)}" }
             ?: getString(R.string.dest_unset)
-        findViewById<Button>(R.id.btnSync).isEnabled = runningJob == null
+        findViewById<Button>(R.id.btnSync).isEnabled = true
+        findViewById<Button>(R.id.btnSync).text =
+            if (runningJob == null) getString(R.string.btn_sync)
+            else getString(R.string.btn_show_progress)
         val state = when {
             runningJob != null -> getString(R.string.status_syncing)
             !link.isOpen -> getString(R.string.status_disconnected)
