@@ -81,6 +81,21 @@ class SyncHistory(context: Context) {
         return datePattern.matches(name)
     }
 
+    /**
+     * Does deciding this file actually require reading a content stamp off the card?
+     *
+     * Only when the name is already recorded AND the ECU could produce that name
+     * again. rusEFI names logs from the RTC (re_YYMMDD_HHMMSS) and only falls back to
+     * a counter when the clock is unset, so a date-patterned name is already unique
+     * and needs no stamp. Every one of the 271 logs this car has produced is
+     * date-patterned - so in practice this returns false and the sync does ZERO extra
+     * reads before copying. Stamping every file up front made the app appear to hang
+     * before it started, which defeats the point of not fetching a laptop.
+     */
+    fun needsStamp(name: String): Boolean = synchronized(copied) {
+        copied.containsKey(name) && !datePattern.matches(name)
+    }
+
     /** Only called after a copy has been verified. */
     fun markCopied(name: String, size: Long, stamp: Long) = synchronized(copied) {
         copied[name] = "$size:$stamp"

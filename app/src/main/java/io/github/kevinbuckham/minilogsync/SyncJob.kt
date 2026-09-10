@@ -97,6 +97,9 @@ class SyncJob(
             return Outcome(0, 0, 0, cancelled.get(), restored = true)  // never mounted
         }
 
+        val t0 = System.currentTimeMillis()
+        fun since() = "%.1fs".format((System.currentTimeMillis() - t0) / 1000.0)
+
         val mount = link.sendCommand(EcuLink.CMD_MOUNT_PHONE)
         if (!mount.ok) {
             // DO NOT assume "no reply" means "did not execute". This ECU drops roughly
@@ -110,7 +113,7 @@ class SyncJob(
             val restored = restoreLogging(log)
             return Outcome(0, 0, 0, cancelled.get(), restored = restored)
         }
-        log("Card mounted; ECU is not logging")
+        log("Card mounted; ECU is not logging  [${since()}]")
 
         // Hand the USB device over to the storage layer: Android will not give
         // libaums a connection while our CDC link holds one.
@@ -124,17 +127,25 @@ class SyncJob(
                 log(err)
             } else {
                 val files = card.listFiles().sortedBy { it.name }
-                log("Card has ${files.size} files")
+                log("Card has ${files.size} files  [${since()}]")
 
-                // Content stamp per file (MLG header timestamp). History keyed on name
-                // alone would classify a renumbered log as "already had" forever.
-                val stamps = files.associate { it.name to card.contentStamp(it) }
+                // Read a stamp ONLY where it changes the decision - i.e. a recorded
+                // name the ECU could produce again. For date-patterned names (all of
+                // them, on this car) name+size already settles it, so this costs no
+                // card reads at all. Stamping every file up front cost a cluster-chain
+                // walk each and made the sync look hung before it began.
+                val stamps = files.associate { f ->
+                    f.name to if (history.needsStamp(f.name)) card.contentStamp(f) else 0L
+                }
+                val probed = stamps.count { it.value != 0L }
+                if (probed > 0) log("Checked $probed reused filename(s) against content")
 
                 val todo = files.filter {
                     !history.isCopied(it.name, it.length, stamps[it.name] ?: 0L)
                 }
                 val totalBytes = todo.sumOf { it.length }
-                log("${todo.size} new file(s), ${fmtMb(totalBytes)} to copy")
+                log("${todo.size} new file(s), ${fmtMb(totalBytes)} to copy  " +
+                    "[${since()} to first byte]")
                 var doneBytes = 0L
                 var index = 0
 
@@ -254,11 +265,13 @@ class SyncJob(
      */
     private fun openCardWithRetry(card: CardReader, log: (String) -> Unit): String? {
         var lastError: String? = null
-        // Fewer, longer waits: each attempt re-claims the USB interface, and the
-        // ECU's USB stack is known to stall when a medium-less LUN is probed.
-        for (attempt in 1..3) {
+        // Try almost immediately, then back off. The old fixed 2 s wait BEFORE the
+        // first attempt was pure latency on every sync - the card is normally ready
+        // as soon as `sdmode pc` is acknowledged.
+        val waits = longArrayOf(250, 1000, 2500, 4000)
+        for (attempt in 1..waits.size) {
             if (!active()) return "Cancelled before the card was opened"
-            Thread.sleep(if (attempt == 1) 2000 else 2500)
+            Thread.sleep(waits[attempt - 1])
             lastError = card.open(log)
             if (lastError == null) return null
             log("Card not ready (attempt $attempt): $lastError")
@@ -367,7 +380,8 @@ class SyncJob(
                 cardSize = size,          // key history on the CARD size, not the trimmed size
                 written = written,
                 crc = sourceCrc.value,
-                stamp = stamp
+                // Computed from bytes copyTrimmed already streamed: no extra reads.
+                stamp = if (card.lastContentStamp != 0L) card.lastContentStamp else stamp
             )
             FileResult.COPIED
         } catch (e: Exception) {

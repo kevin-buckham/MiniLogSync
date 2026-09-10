@@ -27,6 +27,9 @@ import java.io.OutputStream
 class CardReader(private val context: Context) {
 
     private companion object {
+        /** Bytes of data hashed for the content stamp. */
+        const val STAMP_WINDOW = 4096
+
         /**
          * Anything at least this big is the SD card, not the INI ramdisk.
          * Measured on this ECU: ramdisk 1 MB, card 60905 MB.
@@ -36,6 +39,13 @@ class CardReader(private val context: Context) {
 
     private var comm: UsbCommunication? = null
     private var root: UsbFile? = null
+
+    /**
+     * Content stamp of the file the last copyTrimmed processed, computed from bytes it
+     * already streamed - so recording a freshly copied file costs no extra reads.
+     */
+    @Volatile var lastContentStamp: Long = 0L
+        private set
 
     /** Why the last copyTrimmed stopped, for the sync log. */
     @Volatile var lastTrimReason: String = ""
@@ -202,47 +212,29 @@ class CardReader(private val context: Context) {
     }
 
     /**
-     * Content stamp for sync-history keying.
+     * Content stamp for sync-history keying: crc32 over the first 4 KB of DATA.
      *
-     * crc32 over the first 4 KB of DATA (at the header's dataBegin) plus the last
-     * 4 KB of the file. Two positioned reads, ~8 KB per file.
+     * COST MATTERS HERE. An earlier version also hashed the last 4 KB of the file,
+     * which seeks to the end of a 32 MB log and makes libaums walk the whole cluster
+     * chain over USB - and it ran for every file on the card before the first byte was
+     * copied, so the sync appeared to hang before starting. Measured over 266 real
+     * logs, the tail window added NOTHING: first-4-KB-of-data plus the file size is
+     * exactly as discriminating (266/271 distinct, the only collision being six
+     * byte-identical empty logs, which the filename separates).
      *
-     * NOT the MLG header timestamp: that field is 0 in all 266 logs this ECU has
-     * produced (checked against MiniRusEFI/new-logs). Keying on it collapsed history
-     * back to filename-plus-size, and size takes only a handful of values because
-     * every log is the 32 MB pre-allocation - 206 of those 266 logs share just four
-     * sizes. That is the bug this stamp exists to prevent, so the stamp was chosen by
-     * measurement: across the four big size buckets (81, 61, 48 and 16 files) this
-     * one gives a distinct value for every single file. The only files that share a
-     * stamp are six byte-identical empty logs, which the name component separates.
-     *
-     * For non-MLG files (index.txt, ltft.bin) the tail window is the whole file, so
-     * they get a real content stamp too instead of being keyed on size alone.
-     *
-     * Returns 0 only if nothing could be read at all; callers must treat 0 as
-     * "no stamp available", never as a value that matches.
+     * Returns 0 when there is no data region to hash (empty or truncated log).
+     * Callers must treat 0 as "no stamp", never as a matching value.
      */
     fun contentStamp(file: UsbFile): Long = runCatching {
         val len = file.length
         if (len <= 0L) return 0L
-        val crc = java.util.zip.CRC32()
-        val buf = ByteArray(4096)
-        var any = false
-
         val head = ByteArray(MlgTrim.PROBE_BYTES)
         val hn = readAt(file, 0L, head, 0, head.size)
-        MlgTrim.parseHeader(head, hn)?.let { h ->
-            if (h.dataBegin > 0 && h.dataBegin < len) {
-                val n = readAt(file, h.dataBegin.toLong(), buf, 0, buf.size)
-                if (n > 0) { crc.update(buf, 0, n); any = true }
-            }
-        }
-
-        val tailAt = maxOf(0L, len - buf.size)
-        val n2 = readAt(file, tailAt, buf, 0, buf.size)
-        if (n2 > 0) { crc.update(buf, 0, n2); any = true }
-
-        if (any) crc.value else 0L
+        val from = MlgTrim.parseHeader(head, hn)?.dataBegin?.toLong() ?: 0L
+        if (from >= len) return 0L
+        val buf = ByteArray(STAMP_WINDOW)
+        val n = readAt(file, from, buf, 0, buf.size)
+        if (n <= 0) 0L else (java.util.zip.CRC32().apply { update(buf, 0, n) }.value)
     }.getOrDefault(0L)
 
     /** Files in the card root, excluding directories. */
@@ -296,6 +288,17 @@ class CardReader(private val context: Context) {
         onChunk: (ByteArray, Int) -> Unit
     ): Pair<Long, Int> {
         var pos = 0L
+        // Accumulated as we stream, so the stamp needed for sync history costs nothing.
+        val stampCrc = java.util.zip.CRC32()
+        var stampBytes = 0
+        lastContentStamp = 0L
+        fun stampFrom(b: ByteArray, off: Int, len: Int) {
+            if (stampBytes >= STAMP_WINDOW || len <= 0) return
+            val take = minOf(len, STAMP_WINDOW - stampBytes)
+            stampCrc.update(b, off, take)
+            stampBytes += take
+            lastContentStamp = stampCrc.value
+        }
 
         // --- header ---
         val probe = ByteArray(MlgTrim.PROBE_BYTES)
@@ -308,8 +311,11 @@ class CardReader(private val context: Context) {
         }
         val header = MlgTrim.parseHeader(probe, got)
             ?: run {   // not an MLG: copy the rest verbatim
+                stampFrom(probe, 0, got)
                 emit(out, probe, got, onChunk)
-                val rest = drainRest(file, pos, out, keepGoing, onChunk)
+                val rest = drainRest(file, pos, out, keepGoing, onChunk) { b, o, l ->
+                    stampFrom(b, o, l)
+                }
                 return Pair(got + rest, -1)
             }
 
@@ -339,6 +345,7 @@ class CardReader(private val context: Context) {
         while (keepGoing()) {
             val n = readAt(file, pos, chunk, 0, chunk.size)
             pos += n
+            if (n > 0) stampFrom(chunk, 0, n)
             val buf = if (pending.isEmpty() && n == chunk.size) chunk
                       else pending + chunk.copyOf(maxOf(n, 0))
             val avail = if (pending.isEmpty() && n == chunk.size) n else pending.size + maxOf(n, 0)
@@ -399,7 +406,8 @@ class CardReader(private val context: Context) {
         from: Long,
         out: OutputStream,
         keepGoing: () -> Boolean,
-        onChunk: (ByteArray, Int) -> Unit
+        onChunk: (ByteArray, Int) -> Unit,
+        onRaw: ((ByteArray, Int, Int) -> Unit)? = null
     ): Long {
         val buf = ByteArray(64 * 1024)
         var pos = from
@@ -408,6 +416,7 @@ class CardReader(private val context: Context) {
             val n = readAt(file, pos, buf, 0, buf.size)
             if (n <= 0) break
             pos += n
+            onRaw?.invoke(buf, 0, n)
             emit(out, buf, n, onChunk)
             copied += n
         }
