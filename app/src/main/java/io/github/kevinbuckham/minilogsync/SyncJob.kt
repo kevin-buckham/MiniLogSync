@@ -265,16 +265,31 @@ class SyncJob(
      */
     private fun openCardWithRetry(card: CardReader, log: (String) -> Unit): String? {
         var lastError: String? = null
-        // Try almost immediately, then back off. The old fixed 2 s wait BEFORE the
-        // first attempt was pure latency on every sync - the card is normally ready
-        // as soon as `sdmode pc` is acknowledged.
-        val waits = longArrayOf(250, 1000, 2500, 4000)
+        // The wait before the FIRST attempt is load-bearing, not padding.
+        //
+        // `sdmode pc` is acknowledged in about 0.1 s, but that is only the console
+        // command being accepted - the ECU still has to mount the SD card and attach
+        // it to LUN 1. Probing 250 ms later caught it mid-attach and libaums threw
+        // `newLimit > capacity: (34 > 18)` out of ScsiBlockDevice.transferOneCommand,
+        // i.e. a malformed SCSI response. Worse, a malformed transfer desynchronises
+        // the bulk endpoints, so every later attempt inherits a wedged device and
+        // hangs instead of failing fast - which is what made the sync look frozen
+        // with the progress dialog stuck on "Preparing...".
+        //
+        // 2 s was the value that worked for weeks. Do not shorten it again without
+        // evidence from the car that a smaller one is reliable; the failure is not
+        // "slightly slower", it is a wedged sync with the ECU left not logging.
+        val waits = longArrayOf(2000, 2500, 3000, 4000)
         for (attempt in 1..waits.size) {
             if (!active()) return "Cancelled before the card was opened"
             Thread.sleep(waits[attempt - 1])
             lastError = card.open(log)
             if (lastError == null) return null
             log("Card not ready (attempt $attempt): $lastError")
+            if (attempt == 1) {
+                log("  (if this says the LUN was skipped, the card was probably still " +
+                    "attaching - later attempts wait longer)")
+            }
         }
         return lastError
     }

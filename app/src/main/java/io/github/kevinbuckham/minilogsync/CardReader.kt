@@ -133,8 +133,14 @@ class CardReader(private val context: Context) {
                     // but log enough to tell an expected skip from a real defect.
                     val where = e.stackTrace.firstOrNull { it.className.contains("libaums") }
                         ?.let { " at ${it.className.substringAfterLast('.')}.${it.methodName}" } ?: ""
-                    log("  LUN $lun skipped: ${e.javaClass.simpleName}: " +
-                        "${e.message ?: "(no message)"}$where")
+                    val msg = e.message ?: "(no message)"
+                    log("  LUN $lun skipped: ${e.javaClass.simpleName}: $msg$where")
+                    // A buffer/limit mismatch out of the SCSI layer means the device
+                    // returned a malformed response - typically the card still
+                    // attaching after `sdmode pc`, not a filesystem problem.
+                    if (msg.contains("newLimit") || msg.contains("capacity")) {
+                        log("    -> malformed SCSI reply; the card was likely not ready yet")
+                    }
                 }
             }
             if (!keepComm) runCatching { c.close() }
