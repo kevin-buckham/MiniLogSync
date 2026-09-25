@@ -1,38 +1,63 @@
-# MiniLogSync
+# MiniLogSync (beta)
 
-Android companion for a rusEFI ECU: hands the SD card to the phone so logs can
-be copied without getting a laptop into the car, then gives the card back so the
-ECU resumes logging.
+One-button retrieval of SD-card logs from a rusEFI ECU to an Android phone, so
+you don't need a laptop in the car to get your data.
 
-Built for a Classic Mini + Honda D16Y8 on a uaEFI Pro (see the MiniRusEFI
-project, `docs/ANDROID_LOG_SYNC_SPEC.md` for the full spec).
+Plug the phone into the ECU's USB port, tap **SYNC NEW LOGS**, and the app:
 
-## What v1 does
+1. asks the ECU to hand its SD card to the phone (`sdmode pc`, the ECU **stops
+   logging** while this is happening, and the app says so loudly),
+2. copies only the logs it hasn't copied before to a folder you choose (local
+   storage or any cloud provider that shows up in Android's folder picker),
+3. hands the card straight back to the ECU (`sdmode auto`) and tells you when
+   it's **safe to unplug**,
+4. verifies every copy afterwards. A failed file is not marked done, so the
+   next sync retries it.
 
-Three commands over the ECU's USB CDC serial link:
+It also trims the padding off each log while copying. rusEFI pre-allocates
+every SD log to 32 MB and only cuts it to size on a clean shutdown, which never
+happens when the ECU loses power at key-off.
 
-| Button | Sends | Effect |
-|---|---|---|
-| Mount card to phone | `sdmode pc` | SD card appears as USB storage. **ECU stops logging.** |
-| Return to ECU (auto) | `sdmode auto` | ECU resumes its configured behaviour (logging) |
-| Force ECU logging | `sdmode ecu` | Explicitly assigns the card to the ECU |
+## Status: beta, tested on one car
 
-File copying is deliberately left to Android's Files app: while the card is
-mounted it behaves as ordinary USB storage, so anything (including a cloud
-folder) can be the destination.
+| | |
+|---|---|
+| Tested phone | Google Pixel 10 Pro XL (USB-C to USB-C cable) |
+| Tested ECU | uaEFI Pro (rusEFI, 2026 development firmware) |
+| Android | 8.0+ (minSdk 26) |
+
+Other rusEFI boards with USB and an SD card should work if their firmware has
+the `sdmode` console command, but they haven't been tried. Reports welcome.
+
+## Requirements
+
+- **The SD card must be FAT32.** The app reads the card with its own USB
+  storage stack ([libaums](https://github.com/magnusja/libaums)), which only
+  understands FAT32. Cards larger than 32 GB ship formatted exFAT and **will not
+  work** until reformatted as FAT32.
+- A data-capable USB-C cable between the phone and the ECU.
+
+## Install
+
+Download the APK from the
+[Releases](../../releases) page and sideload it (Android will ask you to allow
+installing from your browser or file manager). Releases are signed with the
+project's release key, so newer versions install over older ones and keep your
+sync history.
 
 ## Safety
 
-- The app sends **only** those three commands. No tuning, no config writes.
-- `sdmode format` exists in the firmware and **wipes the card**; it deliberately
-  does not appear anywhere in this codebase.
-- Nothing on the card is written or deleted by this app.
-- While mounted, the ECU is not logging - the UI says so, loudly.
+- The app sends only three console commands: `sdmode pc`, `sdmode auto` and
+  `sdmode ecu`. It never writes tune or configuration data.
+- `sdmode format` (which wipes the card) does not appear anywhere in this code.
+- Nothing on the card is written or deleted.
+- **If you drive away while the card is mounted to the phone, the ECU is not
+  logging.** Use *Return card to ECU* (under Advanced) if a sync was
+  interrupted.
 
-## Protocol
+## How it talks to the ECU
 
-rusEFI/TunerStudio binary framing, verified against firmware source
-(`firmware/console/binary/tunerstudio_io.cpp`):
+rusEFI / TunerStudio binary framing over the USB CDC serial port:
 
 ```
 [ length : uint16 BE ]  = payload + 1
@@ -45,12 +70,32 @@ Reply `00 01 00 <crc32>` = TS_RESPONSE_OK.
 
 ## Building
 
-No local Android SDK needed - GitHub Actions builds the APK on every push
-(Actions tab -> latest run -> Artifacts -> `MiniLogSync-debug-apk`).
-Sideload the APK on the phone (allow install from unknown sources).
+No Android SDK needed locally: GitHub Actions builds an APK on every push. In
+this repo the build is signed with a release key stored in Actions secrets.
+In a fork (no secrets) it builds an unsigned debug APK instead, which is fine
+for testing but can't update an installed release build.
 
-## Status
+To build locally: `gradle assembleDebug` (Android SDK and Gradle required; no
+wrapper is committed).
 
-v1 = mount/unmount remote control. Planned next (spec section 12): one-button
-sync with copy history, then truncate-during-copy (logs are 32 MB pre-allocated
-regardless of content).
+Maintainers: pushing a tag like `v0.3.0` publishes the signed APK as a GitHub
+Release.
+
+## Part of
+
+A Honda D16 + rusEFI project. See the
+[D16 rusEFI guide](https://kevin-buckham.github.io/d16-rusefi-guide/) (coming soon).
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+### Third-party licenses
+
+The APK includes these libraries, each under its own license:
+
+| Library | License |
+|---|---|
+| [libaums](https://github.com/magnusja/libaums) | Apache-2.0 |
+| [usb-serial-for-android](https://github.com/mik3y/usb-serial-for-android) | MIT |
+| [AndroidX](https://developer.android.com/jetpack/androidx) (appcompat, activity-ktx, documentfile) | Apache-2.0 |

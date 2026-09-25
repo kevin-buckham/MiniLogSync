@@ -20,26 +20,30 @@ android {
         versionName = buildLabel
     }
 
-    // A FIXED debug key, committed to the repo. Without this every CI run
-    // generates its own throwaway debug keystore, so each APK is signed with a
-    // different key and Android refuses to update in place ("App not installed")
-    // - which would wipe the sync history and destination on every update.
-    // This is a debug key for a personal tool: it protects nothing.
+    // Release builds are signed with a key that lives ONLY in GitHub Actions
+    // secrets (never in this repo). CI decodes it to a temp file and passes the
+    // path and passwords through the environment. Every CI build is signed with
+    // the same key, so Android updates in place and keeps the sync history.
+    // Without those variables (a fork, a local build) the release APK is left
+    // unsigned; use assembleDebug locally instead.
+    val releaseKeystore = System.getenv("MLS_KEYSTORE_PATH")
     signingConfigs {
-        getByName("debug") {
-            storeFile = rootProject.file("debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = file(releaseKeystore)
+                storePassword = System.getenv("MLS_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("MLS_KEY_ALIAS")
+                keyPassword = System.getenv("MLS_KEY_PASSWORD")
+            }
         }
     }
 
     buildTypes {
-        debug {
-            signingConfig = signingConfigs.getByName("debug")
-        }
         release {
             isMinifyEnabled = false
+            if (releaseKeystore != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 

@@ -6,3 +6,7 @@ build/
 captures/
 .externalNativeBuild/
 .cxx/
+
+# signing keys never go in the repo (release key lives in Actions secrets)
+*.jks
+*.keystore

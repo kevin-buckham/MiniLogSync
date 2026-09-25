@@ -4,9 +4,15 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write   # needed to attach APKs to a GitHub Release on tag pushes
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # true only in the upstream repo, where the signing secrets exist
+      HAS_KEY: ${{ secrets.MLS_KEYSTORE_B64 != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -25,23 +31,60 @@ jobs:
           echo "label=$(date -u +%Y%m%d-%H%M)-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           echo "code=$(( $(date -u +%s) / 60 ))" >> "$GITHUB_OUTPUT"
 
+      # The release key lives only in Actions secrets. Decode it to a temp file
+      # outside the workspace; the runner is discarded after the job.
+      - name: Restore signing key
+        if: env.HAS_KEY == 'true'
+        env:
+          KEYSTORE_B64: ${{ secrets.MLS_KEYSTORE_B64 }}
+        run: |
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          echo "MLS_KEYSTORE_PATH=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+
       # No gradle wrapper committed (cannot generate the wrapper jar offline);
       # the setup-gradle action provides the gradle CLI.
-      - name: Build debug APK
+      - name: Build signed release APK
+        if: env.HAS_KEY == 'true'
+        env:
+          MLS_KEYSTORE_PASSWORD: ${{ secrets.MLS_KEYSTORE_PASSWORD }}
+          MLS_KEY_ALIAS: ${{ secrets.MLS_KEY_ALIAS }}
+          MLS_KEY_PASSWORD: ${{ secrets.MLS_KEY_PASSWORD }}
+        run: |
+          gradle assembleRelease --no-daemon --stacktrace \
+            -PbuildLabel=${{ steps.info.outputs.label }} \
+            -PbuildCode=${{ steps.info.outputs.code }}
+          mkdir -p out
+          cp app/build/outputs/apk/release/app-release.apk \
+             "out/MiniLogSync-${{ steps.info.outputs.label }}.apk"
+
+      # Forks have no signing key: build a debug APK so the build still proves
+      # the code compiles. Debug APKs from different runs cannot update each other.
+      - name: Build debug APK (no signing key)
+        if: env.HAS_KEY != 'true'
         run: |
           gradle assembleDebug --no-daemon --stacktrace \
             -PbuildLabel=${{ steps.info.outputs.label }} \
             -PbuildCode=${{ steps.info.outputs.code }}
-
-      - name: Name the APK
-        run: |
           mkdir -p out
           cp app/build/outputs/apk/debug/app-debug.apk \
-             "out/MiniLogSync-${{ steps.info.outputs.label }}.apk"
-          ls -la out
+             "out/MiniLogSync-${{ steps.info.outputs.label }}-debug.apk"
+
+      - run: ls -la out
 
       - uses: actions/upload-artifact@v4
         with:
           name: MiniLogSync-${{ steps.info.outputs.label }}
           path: out/*.apk
           if-no-files-found: error
+
+      # Pushing a tag like v0.3.0 publishes the signed APK as a GitHub Release,
+      # which is where users should download from (artifacts expire and need a login).
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v') && env.HAS_KEY == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" out/*.apk \
+            --title "MiniLogSync ${GITHUB_REF_NAME}" \
+            --notes "Beta. Signed release build ${{ steps.info.outputs.label }}." \
+            --prerelease
