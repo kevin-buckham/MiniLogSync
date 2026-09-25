@@ -21,7 +21,11 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # The action's default also installs the legacy 'tools' package, which
+      # Google's SDK repository no longer serves (sdkmanager exits 1).
       - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
 
       - uses: gradle/actions/setup-gradle@v4
 
