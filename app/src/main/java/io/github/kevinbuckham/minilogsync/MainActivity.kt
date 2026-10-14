@@ -582,7 +582,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun send(command: String, onDone: (Boolean) -> Unit) {
         if (!link.isOpen) {
-            log("Not connected - tap Connect first")
+            // Shown, not just logged: a silent no-op on "Return card to ECU" reads as
+            // success, and the owner drives away with the ECU not logging.
+            showBlocked("Not connected to the ECU - nothing was sent. Connecting now; " +
+                "accept the USB prompt if one appears, then try again.")
+            connect()
             return
         }
         log("-> $command")
@@ -696,11 +700,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * SYNC refused to start. Say why ON the Sync screen: these used to go only to the
-     * Log tab, so on a fresh install - no USB permission yet, no folder chosen - the
-     * button appeared to do nothing at all.
+     * A button refused to act. Say why ON the Sync screen: these used to go only to
+     * the Log tab, so on a fresh install - no USB permission yet, no folder chosen -
+     * SYNC and the manual card buttons appeared to do nothing at all.
      */
-    private fun syncBlocked(why: String) {
+    private fun showBlocked(why: String) {
         log(why)
         summaryView.text = "⚠ $why"
         summaryView.visibility = android.view.View.VISIBLE
@@ -710,13 +714,13 @@ class MainActivity : AppCompatActivity() {
     private fun startSync() {
         val dest = destinationUri()
         if (dest == null) {
-            syncBlocked("Choose a destination folder first")
+            showBlocked("Choose a destination folder first")
             return
         }
         if (!link.isOpen) {
             // Usually a fresh install that has not been granted USB access yet;
             // connect() asks for it, or explains that no ECU is attached.
-            syncBlocked("Not connected to the ECU - connecting now. Accept the USB " +
+            showBlocked("Not connected to the ECU - connecting now. Accept the USB " +
                 "prompt if one appears, then tap SYNC again.")
             connect()
             return
