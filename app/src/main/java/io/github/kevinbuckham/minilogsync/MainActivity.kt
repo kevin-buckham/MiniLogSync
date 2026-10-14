@@ -677,10 +677,32 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * SYNC refused to start. Say why ON the Sync screen: these used to go only to the
+     * Log tab, so on a fresh install - no USB permission yet, no folder chosen - the
+     * button appeared to do nothing at all.
+     */
+    private fun syncBlocked(why: String) {
+        log(why)
+        summaryView.text = "⚠ $why"
+        summaryView.visibility = android.view.View.VISIBLE
+        android.widget.Toast.makeText(this, why, android.widget.Toast.LENGTH_LONG).show()
+    }
+
     private fun startSync() {
-        if (!link.isOpen) { log("Not connected - tap Connect first"); return }
         val dest = destinationUri()
-        if (dest == null) { log("Pick a destination folder first"); return }
+        if (dest == null) {
+            syncBlocked("Choose a destination folder first")
+            return
+        }
+        if (!link.isOpen) {
+            // Usually a fresh install that has not been granted USB access yet;
+            // connect() asks for it, or explains that no ECU is attached.
+            syncBlocked("Not connected to the ECU - connecting now. Accept the USB " +
+                "prompt if one appears, then tap SYNC again.")
+            connect()
+            return
+        }
 
         val job = SyncJob(applicationContext, link, history)
         runningJob = job
