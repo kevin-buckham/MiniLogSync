@@ -75,7 +75,9 @@ class SyncJob(
         destTree: Uri,
         log: (String) -> Unit,
         progress: (Progress?) -> Unit = {},
-        onSafeToUnplug: () -> Unit = {}
+        onSafeToUnplug: () -> Unit = {},
+        askAbove: Int = Int.MAX_VALUE,
+        chooseScope: ((List<SyncScope.Option>) -> SyncScope.Option)? = null
     ): Outcome {
         var copied = 0
         var skipped = 0
@@ -126,7 +128,9 @@ class SyncJob(
             if (err != null) {
                 log(err)
             } else {
-                val files = card.listFiles().sortedBy { it.name }
+                // Newest first: if the owner leaves or cancels part-way, the logs they
+                // most likely came for are already safe.
+                val files = SyncScope.newestFirst(card.listFiles()) { it.name }
                 log("Card has ${files.size} files  [${since()}]")
 
                 // Read a stamp ONLY where it changes the decision - i.e. a recorded
@@ -140,8 +144,11 @@ class SyncJob(
                 val probed = stamps.count { it.value != 0L }
                 if (probed > 0) log("Checked $probed reused filename(s) against content")
 
-                val todo = files.filter {
+                var todo = files.filter {
                     !history.isCopied(it.name, it.length, stamps[it.name] ?: 0L)
+                }
+                if (todo.size > askAbove && chooseScope != null && active()) {
+                    todo = applyScope(todo, chooseScope, log)
                 }
                 val totalBytes = todo.sumOf { it.length }
                 log("${todo.size} new file(s), ${fmtMb(totalBytes)} to copy  " +
@@ -292,6 +299,40 @@ class SyncJob(
             }
         }
         return lastError
+    }
+
+    /**
+     * Ask the owner how far back to go, and record the logs they chose to skip as
+     * synced so they are not offered again. Returns what is left to copy.
+     *
+     * The ECU is not logging while this waits, so [chooseScope] must time out - it
+     * answers "everything" when nobody responds, which never loses a log.
+     */
+    private fun applyScope(
+        todo: List<me.jahnen.libaums.core.fs.UsbFile>,
+        chooseScope: (List<SyncScope.Option>) -> SyncScope.Option,
+        log: (String) -> Unit
+    ): List<me.jahnen.libaums.core.fs.UsbFile> {
+        val now = java.time.LocalDateTime.now()
+        val options = SyncScope.options(todo.associate { it.name to it.length }, now)
+        if (options.size < 2) return todo                 // nothing old enough to skip
+        log("${todo.size} new logs - asking how far back to copy")
+        alive()
+        val choice = chooseScope(options)
+        alive()
+        if (!active()) return todo                        // cancelled while asking
+        if (choice.days == null) {
+            log("Copying all ${todo.size} new logs, newest first")
+            return todo
+        }
+        val (old, keep) = todo.partition { SyncScope.isTooOld(it.name, choice.days, now) }
+        // Date-patterned names only (undated logs are never too old), which is what
+        // lets a stamp of 0 be recorded safely - see SyncHistory.isCopied.
+        old.forEach { history.markCopied(it.name, it.length, 0L) }
+        log("${choice.label}: skipping ${old.size} older log(s), marked as synced " +
+            "('Forget sync history' brings them back)")
+        old.forEach { log("  skipped ${it.name}") }
+        return keep
     }
 
     private enum class FileResult { COPIED, SKIPPED, FAILED, CANCELLED }

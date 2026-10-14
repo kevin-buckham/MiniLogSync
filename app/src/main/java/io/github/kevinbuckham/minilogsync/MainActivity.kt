@@ -81,6 +81,41 @@ class MainActivity : AppCompatActivity() {
         @Volatile private var uiOutcome: ((SyncJob.Outcome) -> Unit)? = null
         @Volatile private var safeAnnounced = false
 
+        /** Shows the "how far back?" chooser on the live Activity; see askScope. */
+        @Volatile private var uiChooseScope:
+            ((List<SyncScope.Option>, Int, (SyncScope.Option) -> Unit) -> Unit)? = null
+        @Volatile private var uiDismissScope: (() -> Unit)? = null
+
+        const val DEFAULT_ASK_ABOVE = 10
+        const val DEFAULT_ASK_TIMEOUT_S = 10
+
+        /**
+         * Runs on the sync thread and blocks it until the owner picks, the countdown
+         * runs out, or the sync is cancelled. The ECU is NOT logging meanwhile, so
+         * every path ends quickly and the default - everything - never loses a log.
+         * No Activity alive means nobody to ask: copy everything at once.
+         */
+        fun askScope(
+            app: Context, job: SyncJob, options: List<SyncScope.Option>, timeoutS: Int
+        ): SyncScope.Option {
+            val everything = options.last()
+            val ui = uiChooseScope ?: return everything
+            val answer = java.util.concurrent.atomic.AtomicReference<SyncScope.Option?>(null)
+            val latch = java.util.concurrent.CountDownLatch(1)
+            SyncKeepAlive.update(
+                app, "${everything.count} new logs - choose how far back in the app " +
+                    "(copying all in $timeoutS s)", -1, safe = false
+            )
+            ui(options, timeoutS) { o -> if (answer.compareAndSet(null, o)) latch.countDown() }
+            // A little slack past the dialog's own countdown, which answers itself.
+            val deadline = System.currentTimeMillis() + timeoutS * 1000L + 2000L
+            while (!job.cancelled.get() && System.currentTimeMillis() < deadline) {
+                if (latch.await(250, java.util.concurrent.TimeUnit.MILLISECONDS)) break
+            }
+            uiDismissScope?.invoke()
+            return answer.get() ?: everything
+        }
+
         /**
          * A foreground service stops the PROCESS being killed; it does not stop the
          * DEVICE suspending. With the screen off and no wake lock, USB bulk transfers
@@ -253,6 +288,10 @@ class MainActivity : AppCompatActivity() {
     private var myProgress: ((SyncJob.Progress?) -> Unit)? = null
     private var mySafe: (() -> Unit)? = null
     private var myOutcome: ((SyncJob.Outcome) -> Unit)? = null
+    private var myChooseScope:
+        ((List<SyncScope.Option>, Int, (SyncScope.Option) -> Unit) -> Unit)? = null
+    private var myDismissScope: (() -> Unit)? = null
+    private var scopeDialog: androidx.appcompat.app.AlertDialog? = null
 
     private var progressDialog: androidx.appcompat.app.AlertDialog? = null
     private var dlgFile: TextView? = null
@@ -396,6 +435,9 @@ class MainActivity : AppCompatActivity() {
             log("Sync history cleared - the next sync re-copies everything")
         }
 
+        findViewById<Button>(R.id.btnAskScope).setOnClickListener { editAskScopeSettings() }
+        updateAskScopeButton()
+
         val filter = IntentFilter().apply {
             addAction(EcuLink.ACTION_USB_PERMISSION)
             addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
@@ -422,10 +464,16 @@ class MainActivity : AppCompatActivity() {
         myProgress = { p -> runOnUiThread { updateProgressDialog(p) } }
         mySafe = { runOnUiThread { announceSafeToUnplug() } }
         myOutcome = { o -> runOnUiThread { onSyncFinished(o) } }
+        myChooseScope = { options, timeoutS, answer ->
+            runOnUiThread { showScopeChooser(options, timeoutS, answer) }
+        }
+        myDismissScope = { runOnUiThread { dismissScopeChooser() } }
         uiLog = myLog
         uiProgress = myProgress
         uiSafeToUnplug = mySafe
         uiOutcome = myOutcome
+        uiChooseScope = myChooseScope
+        uiDismissScope = myDismissScope
         ensureDetachReceiver(this)
 
         initLogFile(this)
@@ -459,6 +507,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         dismissProgressDialog()
+        dismissScopeChooser()
         try { unregisterReceiver(usbReceiver) } catch (_: Exception) {}
         // A sync in flight owns the USB link and the card. Tearing it down here would
         // abandon the ECU mounted and NOT LOGGING - and this ran on something as
@@ -473,6 +522,8 @@ class MainActivity : AppCompatActivity() {
         if (uiProgress === myProgress) uiProgress = null
         if (uiSafeToUnplug === mySafe) uiSafeToUnplug = null
         if (uiOutcome === myOutcome) uiOutcome = null
+        if (uiChooseScope === myChooseScope) uiChooseScope = null
+        if (uiDismissScope === myDismissScope) uiDismissScope = null
         if (isSyncing) {
             // Link, worker and job are process-scoped now, so the copy carries on and
             // a recreated Activity simply reattaches to it.
@@ -644,6 +695,8 @@ class MainActivity : AppCompatActivity() {
         showProgressDialog(job)
         log("=== Sync started ===")
         setMountedFlag(true)
+        val askAbove = prefs.getInt("ask_above", DEFAULT_ASK_ABOVE)
+        val askTimeoutS = prefs.getInt("ask_timeout_s", DEFAULT_ASK_TIMEOUT_S)
         io.execute {
             val app = applicationContext
             // isSyncing is process-scoped now, so a throw escaping here would wedge it
@@ -670,7 +723,9 @@ class MainActivity : AppCompatActivity() {
                     SyncKeepAlive.update(app, "Checking copied files - the ECU is not needed",
                                          -1, safe = true)
                     uiSafeToUnplug?.invoke()
-                }
+                },
+                askAbove = askAbove,
+                chooseScope = { options -> askScope(app, job, options, askTimeoutS) }
                 )
             } catch (t: Throwable) {
                 emitLog("SYNC CRASHED: ${t.javaClass.simpleName}: ${t.message}")
@@ -823,6 +878,95 @@ class MainActivity : AppCompatActivity() {
         progressDialog = null
         dlgFile = null; dlgName = null; dlgDetail = null; dlgBar = null
         dlgUnplug = null; dlgWarn = null
+    }
+
+    /**
+     * "How far back?" with a visible countdown. Running out, Back, or tapping outside
+     * all mean "everything" - the safe default - and answer immediately, because the
+     * ECU is not logging while this is up.
+     */
+    private fun showScopeChooser(
+        options: List<SyncScope.Option>, timeoutS: Int, answer: (SyncScope.Option) -> Unit
+    ) {
+        dismissScopeChooser()
+        val everything = options.last()
+        val handler = android.os.Handler(mainLooper)
+        var left = timeoutS
+        fun title() = "${everything.count} new logs - copying all in ${left}s"
+
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle(title())
+            .setItems(options.map(SyncScope::describe).toTypedArray()) { _, i ->
+                answer(options[i])
+            }
+            .setOnCancelListener { answer(everything) }
+            .create()
+        val tick = object : Runnable {
+            override fun run() {
+                if (!dialog.isShowing) return
+                left--
+                if (left <= 0) {
+                    answer(everything)
+                    dialog.dismiss()
+                } else {
+                    dialog.setTitle(title())
+                    handler.postDelayed(this, 1000)
+                }
+            }
+        }
+        dialog.setOnDismissListener { handler.removeCallbacks(tick) }
+        dialog.show()
+        handler.postDelayed(tick, 1000)
+        scopeDialog = dialog
+    }
+
+    private fun dismissScopeChooser() {
+        runCatching { scopeDialog?.dismiss() }
+        scopeDialog = null
+    }
+
+    private fun updateAskScopeButton() {
+        val above = prefs.getInt("ask_above", DEFAULT_ASK_ABOVE)
+        val secs = prefs.getInt("ask_timeout_s", DEFAULT_ASK_TIMEOUT_S)
+        findViewById<Button>(R.id.btnAskScope).text =
+            getString(R.string.btn_ask_scope, above, secs)
+    }
+
+    private fun editAskScopeSettings() {
+        fun field(hint: String, value: Int) = android.widget.EditText(this).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            this.hint = hint
+            setText(value.toString())
+        }
+        val above = field("Ask when more than this many new logs",
+                          prefs.getInt("ask_above", DEFAULT_ASK_ABOVE))
+        val secs = field("Seconds before copying everything",
+                         prefs.getInt("ask_timeout_s", DEFAULT_ASK_TIMEOUT_S))
+        val pad = (16 * resources.displayMetrics.density).toInt()
+        val box = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(pad, pad / 2, pad, 0)
+            addView(TextView(context).apply { text = "Ask when more than this many new logs:" })
+            addView(above)
+            addView(TextView(context).apply { text = "Seconds to wait before copying everything:" })
+            addView(secs)
+        }
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("How far back to copy")
+            .setView(box)
+            .setPositiveButton("Save") { _, _ ->
+                // Clamped: a long wait keeps the ECU from logging, and 0 s would make
+                // the question unanswerable.
+                val a = above.text.toString().toIntOrNull()?.coerceIn(1, 10_000)
+                    ?: DEFAULT_ASK_ABOVE
+                val s = secs.text.toString().toIntOrNull()?.coerceIn(3, 60)
+                    ?: DEFAULT_ASK_TIMEOUT_S
+                prefs.edit().putInt("ask_above", a).putInt("ask_timeout_s", s).apply()
+                updateAskScopeButton()
+                log("Will ask how far back when more than $a new logs (copy all after $s s)")
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     /** A plain-language result that stays on screen, instead of a buried log line. */
