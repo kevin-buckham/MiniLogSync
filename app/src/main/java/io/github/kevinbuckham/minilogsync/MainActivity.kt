@@ -491,11 +491,29 @@ class MainActivity : AppCompatActivity() {
         connect()
     }
 
+    /** onStop gave the port back; take it again when the owner returns. */
+    private var releasedOnStop = false
+
+    override fun onStart() {
+        super.onStart()
+        // Without this the link stayed closed after ANY trip out of the app - and the
+        // folder picker is one, so on a fresh install "choose folder, tap SYNC" always
+        // failed with "Not connected". Only after onStop released it: first launch is
+        // already connected by onCreate.
+        if (releasedOnStop) {
+            releasedOnStop = false
+            if (!isSyncing && !link.isOpen) connect()
+        }
+    }
+
     override fun onStop() {
         super.onStop()
         // Home button / app switch: if nothing is in flight, give the port back rather
         // than holding it for the process lifetime.
-        if (!isSyncing && !mountedToPhone) releaseIdleLink()
+        if (!isSyncing && !mountedToPhone) {
+            releaseIdleLink()
+            releasedOnStop = true
+        }
     }
 
     private fun releaseIdleLink() {
