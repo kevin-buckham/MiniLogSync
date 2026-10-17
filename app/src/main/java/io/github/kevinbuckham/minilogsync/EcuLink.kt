@@ -229,6 +229,59 @@ class EcuLink(private val context: Context) {
         }
     }
 
+    /**
+     * A READ-ONLY TunerStudio request, for live logging: the firmware signature ('S')
+     * or a slice of the output-channel block ('O'). Anything else is refused here, so
+     * this cannot become a back door around the three-command rule above - neither
+     * code changes ECU state, which is why TunerStudio polls them continuously.
+     *
+     * Returns the reply payload after the status byte, or null on a missing, short,
+     * corrupt or non-OK reply. Unlike sendCommand there is no drain up front: an empty
+     * drain costs a 50 ms read timeout, which at three requests per sample would cap
+     * logging near 6 Hz. Instead a failed request drains, so the next one starts clean.
+     */
+    fun request(frame: ByteArray, maxPayload: Int, timeoutMs: Int = 500): ByteArray? {
+        val code = frame.getOrNull(2)
+        require(code == TsPacket.CODE_HELLO || code == TsPacket.CODE_OUTPUT) {
+            "Only read-only requests may be sent"
+        }
+        val p = port ?: return null
+        return try {
+            p.write(frame, WRITE_TIMEOUT_MS)
+            val cap = 2 + 1 + maxPayload + 4
+            if (rx.size < cap) rx = ByteArray(cap)
+            val buf = rx
+            var total = 0
+            var want = -1
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (System.currentTimeMillis() < deadline) {
+                if (want < 0 && total >= 2) {
+                    val declared = TsPacket.declaredLength(buf, total)
+                    if (declared < 1 || 2 + declared + 4 > cap) break     // garbage
+                    want = 2 + declared + 4
+                }
+                if (want in 1..total) break
+                val n = p.read(rxChunk, 100)
+                if (n > 0) {
+                    val take = minOf(n, buf.size - total)
+                    rxChunk.copyInto(buf, total, 0, take)
+                    total += take
+                }
+            }
+            if (want < 0 || total < want) { drain(p); return null }
+            val bodyLen = want - 6
+            val crc = java.util.zip.CRC32().apply { update(buf, 2, bodyLen) }.value.toInt()
+            val got = java.nio.ByteBuffer.wrap(buf, 2 + bodyLen, 4).int
+            if (crc != got || buf[2] != TsPacket.RESPONSE_OK) { drain(p); return null }
+            buf.copyOfRange(3, 2 + bodyLen)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private var rx = ByteArray(4096)
+    private val rxChunk = ByteArray(4096)
+
     private fun drain(p: UsbSerialPort) {
         val scratch = ByteArray(256)
         repeat(4) {

@@ -35,10 +35,32 @@ object TsPacket {
      */
     const val MAX_FRAME = 2 + 1024 + 4
 
-    fun execute(command: String): ByteArray {
-        val payload = command.toByteArray(Charsets.US_ASCII)
+    fun execute(command: String): ByteArray =
+        frame(CODE_EXECUTE, command.toByteArray(Charsets.US_ASCII))
+
+    /** TS_HELLO_COMMAND: replies with the NUL-terminated firmware signature. */
+    const val CODE_HELLO = 'S'.code.toByte()
+
+    /**
+     * TS_OUTPUT_COMMAND: read [count] bytes of the live output-channel block from
+     * [offset]. Both are uint16 LITTLE-endian (the ini's ochGetCommand "O%2o%2c" with
+     * endianness = little; firmware tunerstudio.cpp reads them as native uint16 on a
+     * little-endian MCU). Reply payload: TS_RESPONSE_OK then the raw bytes.
+     */
+    const val CODE_OUTPUT = 'O'.code.toByte()
+
+    fun outputRequest(offset: Int, count: Int): ByteArray = frame(
+        CODE_OUTPUT,
+        byteArrayOf(
+            (offset and 0xFF).toByte(), (offset shr 8 and 0xFF).toByte(),
+            (count and 0xFF).toByte(), (count shr 8 and 0xFF).toByte()
+        )
+    )
+
+    /** One request in the msEnvelope_1.0 framing described above. */
+    fun frame(code: Byte, payload: ByteArray): ByteArray {
         val body = ByteArray(1 + payload.size)
-        body[0] = CODE_EXECUTE
+        body[0] = code
         payload.copyInto(body, 1)
 
         val crc = CRC32().apply { update(body) }.value.toInt()

@@ -123,6 +123,15 @@
                 android:text="@string/btn_dest" />
 
             <Button
+                android:id="@+id/btnLiveLog"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:backgroundTint="@color/action_neutral"
+                android:textColor="#FFFFFF"
+                android:text="@string/btn_live_start" />
+
+            <Button
                 android:id="@+id/btnAdvanced"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -181,6 +190,15 @@
                     android:layout_marginTop="8dp"
                     android:backgroundTint="@color/action_neutral"
                     android:textColor="#FFFFFF" />
+
+                <Button
+                    android:id="@+id/btnLoadIni"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:backgroundTint="@color/action_neutral"
+                    android:textColor="#FFFFFF"
+                    android:text="@string/btn_load_ini" />
 
                 <Button
                     android:id="@+id/btnForget"

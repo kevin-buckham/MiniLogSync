@@ -272,6 +272,14 @@ class MainActivity : AppCompatActivity() {
 
         val isSyncing: Boolean get() = runningJob != null
 
+        /** Live datalogging (test feature). Process-scoped for the same reasons as the sync. */
+        @Volatile private var liveJob: LiveLogJob? = null
+        @Volatile private var uiLiveStats: ((LiveLogJob.Stats?) -> Unit)? = null
+        val isLiveLogging: Boolean get() = liveJob != null
+
+        /** Anything that owns the USB link and must not be disturbed. */
+        val linkBusy: Boolean get() = isSyncing || isLiveLogging
+
         fun linkFor(ctx: Context): EcuLink =
             sharedLink ?: EcuLink(ctx.applicationContext).also { sharedLink = it }
     }
@@ -292,6 +300,11 @@ class MainActivity : AppCompatActivity() {
         ((List<SyncScope.Option>, Int, (SyncScope.Option) -> Unit) -> Unit)? = null
     private var myDismissScope: (() -> Unit)? = null
     private var scopeDialog: androidx.appcompat.app.AlertDialog? = null
+    private var myLiveStats: ((LiveLogJob.Stats?) -> Unit)? = null
+
+    private val pickIni = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) Thread { IniStore.importManual(applicationContext, uri) { emitLog(it) } }.start()
+    }
 
     private var dlgFile: TextView? = null
     private var dlgName: TextView? = null
@@ -438,6 +451,8 @@ class MainActivity : AppCompatActivity() {
         }
 
         findViewById<Button>(R.id.btnAskScope).setOnClickListener { editAskScopeSettings() }
+        findViewById<Button>(R.id.btnLiveLog).setOnClickListener { toggleLiveLog() }
+        findViewById<Button>(R.id.btnLoadIni).setOnClickListener { pickIni.launch(arrayOf("*/*")) }
         updateAskScopeButton()
 
         val filter = IntentFilter().apply {
@@ -476,6 +491,8 @@ class MainActivity : AppCompatActivity() {
         uiOutcome = myOutcome
         uiChooseScope = myChooseScope
         uiDismissScope = myDismissScope
+        myLiveStats = { st -> runOnUiThread { showLiveStats(st) } }
+        uiLiveStats = myLiveStats
         ensureDetachReceiver(this)
 
         initLogFile(this)
@@ -504,7 +521,7 @@ class MainActivity : AppCompatActivity() {
         // already connected by onCreate.
         if (releasedOnStop) {
             releasedOnStop = false
-            if (!isSyncing && !link.isOpen) connect()
+            if (!linkBusy && !link.isOpen) connect()
         }
     }
 
@@ -512,14 +529,14 @@ class MainActivity : AppCompatActivity() {
         super.onStop()
         // Home button / app switch: if nothing is in flight, give the port back rather
         // than holding it for the process lifetime.
-        if (!isSyncing && !mountedToPhone) {
+        if (!linkBusy && !mountedToPhone) {
             releaseIdleLink()
             releasedOnStop = true
         }
     }
 
     private fun releaseIdleLink() {
-        if (isSyncing) return
+        if (linkBusy) return
         runCatching { sharedLink?.close() }
         sharedLink = null
     }
@@ -543,7 +560,8 @@ class MainActivity : AppCompatActivity() {
         if (uiOutcome === myOutcome) uiOutcome = null
         if (uiChooseScope === myChooseScope) uiChooseScope = null
         if (uiDismissScope === myDismissScope) uiDismissScope = null
-        if (isSyncing) {
+        if (uiLiveStats === myLiveStats) uiLiveStats = null
+        if (linkBusy) {
             // Link, worker and job are process-scoped now, so the copy carries on and
             // a recreated Activity simply reattaches to it.
             return
@@ -555,8 +573,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun connect() {
-        if (isSyncing) {
-            log("Sync already running - not reconnecting")
+        if (linkBusy) {
+            log("${if (isSyncing) "Sync" else "Live log"} running - not reconnecting")
             refresh()
             return
         }
@@ -582,6 +600,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun send(command: String, onDone: (Boolean) -> Unit) {
+        if (isLiveLogging) { showBlocked("Stop the live log first"); return }
         if (!link.isOpen) {
             // Shown, not just logged: a silent no-op on "Return card to ECU" reads as
             // success, and the owner drives away with the ECU not logging.
@@ -713,6 +732,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startSync() {
+        if (isLiveLogging) { showBlocked("Stop the live log first"); return }
         val dest = destinationUri()
         if (dest == null) {
             showBlocked("Choose a destination folder first")
@@ -995,6 +1015,61 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    /**
+     * TEST feature: TunerStudio-style live logging to an .mlg in the destination
+     * folder. Runs on its own thread with the same keep-alive as a sync, because a
+     * startup log is exactly the case where the screen goes off mid-capture.
+     */
+    private fun toggleLiveLog() {
+        liveJob?.let { it.stop(); log("Stopping live log..."); return }
+        if (isSyncing) { showBlocked("Wait for the sync to finish"); return }
+        val dest = destinationUri() ?: run { showBlocked("Choose a destination folder first"); return }
+        if (!link.isOpen) {
+            showBlocked("Not connected to the ECU - connecting now. Accept the USB " +
+                "prompt if one appears, then try again.")
+            connect()
+            return
+        }
+        val job = LiveLogJob(applicationContext, link, dest)
+        liveJob = job
+        acquireWakeLock(this)
+        SyncKeepAlive.update(this, "Live logging…")
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        log("=== Live log started ===")
+        refresh()
+        val app = applicationContext
+        Thread {
+            try {
+                job.run(log = { emitLog(it) }) { st ->
+                    SyncKeepAlive.update(app, "Live logging - %.0f Hz, %d samples"
+                        .format(st.hz, st.samples))
+                    uiLiveStats?.invoke(st)
+                }
+            } catch (t: Throwable) {
+                emitLog("LIVE LOG CRASHED: ${t.javaClass.simpleName}: ${t.message}")
+            } finally {
+                liveJob = null
+                SyncKeepAlive.stop(app)
+                releaseWakeLock()
+                emitLog("=== Live log stopped ===")
+                uiLiveStats?.invoke(null)
+            }
+        }.start()
+    }
+
+    /** null = finished. */
+    private fun showLiveStats(st: LiveLogJob.Stats?) {
+        if (st == null) {
+            window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            refresh()
+            return
+        }
+        summaryView.text = "\u25cf LIVE LOG  %.1f s  -  %d samples  -  %.0f Hz  -  %.1f MB%s\n%s".format(
+            st.seconds, st.samples, st.hz, st.bytes / 1048576.0,
+            if (st.errors > 0) "  -  ${st.errors} failed reads" else "", st.file)
+        summaryView.visibility = android.view.View.VISIBLE
+    }
+
     /** A plain-language result that stays on screen, instead of a buried log line. */
     private fun showSummary(o: SyncJob.Outcome) {
         val parts = mutableListOf<String>()
@@ -1032,8 +1107,11 @@ class MainActivity : AppCompatActivity() {
         destView.text = destinationUri()?.let { "Saving to: ${prettyDest(it)}" }
             ?: getString(R.string.dest_unset)
         findViewById<Button>(R.id.btnSync).isEnabled = true
+        findViewById<Button>(R.id.btnLiveLog).text = getString(
+            if (isLiveLogging) R.string.btn_live_stop else R.string.btn_live_start)
         val state = when {
             runningJob != null -> getString(R.string.status_syncing)
+            isLiveLogging -> getString(R.string.status_live)
             !link.isOpen -> getString(R.string.status_disconnected)
             mountedToPhone -> getString(R.string.status_mounted)
             else -> getString(R.string.status_connected)

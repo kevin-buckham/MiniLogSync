@@ -35,6 +35,11 @@ jobs:
           echo "label=$(date -u +%Y%m%d-%H%M)-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           echo "code=$(( $(date -u +%s) / 60 ))" >> "$GITHUB_OUTPUT"
 
+      # Pure-JVM tests (ini parsing, MLG writing, sync-scope logic). Cheap, and the
+      # only place the code runs before it reaches the car.
+      - name: Unit tests
+        run: gradle testDebugUnitTest --no-daemon --stacktrace
+
       # The release key lives only in Actions secrets. Decode it to a temp file
       # outside the workspace; the runner is discarded after the job.
       - name: Restore signing key

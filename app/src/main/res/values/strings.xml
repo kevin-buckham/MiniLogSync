@@ -28,5 +28,9 @@
     <string name="btn_copy_log">Copy log to clipboard</string>
     <string name="unplug_ok">\u2713 SAFE TO UNPLUG\nThe ECU has its card back and is logging.</string>
     <string name="unplug_detail">You can leave. Finishing the file check on the phone \u2013 the ECU is not needed for this.</string>
+    <string name="btn_live_start">LIVE LOG (TEST)</string>
+    <string name="btn_live_stop">STOP LIVE LOG</string>
+    <string name="status_live">Live logging…</string>
+    <string name="btn_load_ini">Load .ini file (custom firmware)</string>
     <string name="progress_preparing">Preparing…</string>
 </resources>
