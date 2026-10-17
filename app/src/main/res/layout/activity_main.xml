@@ -52,6 +52,14 @@
             android:text="@string/tab_sync" />
 
         <Button
+            android:id="@+id/tabLive"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="@string/tab_live" />
+
+        <Button
             android:id="@+id/tabLog"
             android:layout_width="0dp"
             android:layout_weight="1"
@@ -87,6 +95,18 @@
                 android:visibility="gone"
                 android:text="" />
 
+            <!-- Shown instead of the sync/mount controls while a live log owns the link. -->
+            <TextView
+                android:id="@+id/syncBusyNote"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:padding="16dp"
+                android:background="@drawable/panel_bg"
+                android:textSize="16sp"
+                android:visibility="gone"
+                android:text="@string/sync_busy_live" />
+
             <include
                 android:id="@+id/progressPanel"
                 layout="@layout/progress_panel"
@@ -121,15 +141,6 @@
                 android:backgroundTint="@color/action_neutral"
                 android:textColor="#FFFFFF"
                 android:text="@string/btn_dest" />
-
-            <Button
-                android:id="@+id/btnLiveLog"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
-                android:backgroundTint="@color/action_neutral"
-                android:textColor="#FFFFFF"
-                android:text="@string/btn_live_start" />
 
             <Button
                 android:id="@+id/btnAdvanced"
@@ -209,6 +220,93 @@
                     android:textColor="#FFFFFF"
                     android:text="@string/btn_forget" />
             </LinearLayout>
+        </LinearLayout>
+    </ScrollView>
+
+    <!-- ===== LIVE TAB ===== -->
+    <ScrollView
+        android:id="@+id/pageLive"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:visibility="gone"
+        android:padding="16dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/liveBusyNote"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:padding="16dp"
+                android:background="@drawable/panel_bg"
+                android:textSize="16sp"
+                android:visibility="gone"
+                android:text="@string/live_busy_sync" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp"
+                android:background="@drawable/panel_bg">
+
+                <TextView
+                    android:id="@+id/liveEcu"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="monospace"
+                    android:textSize="13sp"
+                    android:text="@string/live_ecu_unknown" />
+
+                <TextView
+                    android:id="@+id/liveStats"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:textSize="18sp"
+                    android:textStyle="bold"
+                    android:text="@string/live_idle" />
+
+                <TextView
+                    android:id="@+id/liveFile"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:fontFamily="monospace"
+                    android:textSize="13sp"
+                    android:text="" />
+            </LinearLayout>
+
+            <Button
+                android:id="@+id/btnLiveLog"
+                android:layout_width="match_parent"
+                android:layout_height="72dp"
+                android:layout_marginTop="12dp"
+                android:textSize="18sp"
+                android:textStyle="bold"
+                android:backgroundTint="@color/action_primary"
+                android:textColor="#FFFFFF"
+                android:text="@string/btn_live_start" />
+
+            <TextView
+                android:id="@+id/liveDest"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:textSize="15sp"
+                android:text="@string/dest_unset" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:textSize="13sp"
+                android:text="@string/live_hint" />
         </LinearLayout>
     </ScrollView>
 

@@ -139,7 +139,8 @@ class LiveLogJob(
     /** Converts one output-channel block into one MLG record. */
     private class Slot(val field: MlgWriter.Field, val write: (ByteArray, ByteArray, Int, Float) -> Unit)
 
-    fun run(log: (String) -> Unit, stats: (Stats) -> Unit) {
+    /** [ecu] gets a short "which firmware, which ini" description once both are known. */
+    fun run(log: (String) -> Unit, stats: (Stats) -> Unit, ecu: (String) -> Unit = {}) {
         val sigBytes = link.request(TsPacket.frame(TsPacket.CODE_HELLO, ByteArray(0)), 256, 1000)
         if (sigBytes == null) { log("ECU did not answer the signature request"); return }
         val signature = String(sigBytes, Charsets.US_ASCII).substringBefore('\u0000').trim()
@@ -150,6 +151,8 @@ class LiveLogJob(
             .coerceAtMost(ini.blockSize)
         val slots = plan(ini, log)
         if (slots.isEmpty()) { log("No loggable channels in the ini"); return }
+        ecu("ECU: ${signature.removePrefix("rusEFI ")}\nini: matched \u2713  ${slots.size} channels, " +
+            "${ini.blockSize}-byte block")
 
         val dest = DocumentFile.fromTreeUri(context, destTree)
         if (dest == null || !dest.canWrite()) { log("Destination folder is not writable"); return }

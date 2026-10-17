@@ -9,6 +9,7 @@ import android.hardware.usb.UsbManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.view.View
 import android.widget.Button
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
@@ -275,6 +276,8 @@ class MainActivity : AppCompatActivity() {
         /** Live datalogging (test feature). Process-scoped for the same reasons as the sync. */
         @Volatile private var liveJob: LiveLogJob? = null
         @Volatile private var uiLiveStats: ((LiveLogJob.Stats?) -> Unit)? = null
+        @Volatile private var uiLiveEcu: ((String) -> Unit)? = null
+        @Volatile private var lastLiveStats: LiveLogJob.Stats? = null
         val isLiveLogging: Boolean get() = liveJob != null
 
         /** Anything that owns the USB link and must not be disturbed. */
@@ -301,6 +304,7 @@ class MainActivity : AppCompatActivity() {
     private var myDismissScope: (() -> Unit)? = null
     private var scopeDialog: androidx.appcompat.app.AlertDialog? = null
     private var myLiveStats: ((LiveLogJob.Stats?) -> Unit)? = null
+    private var myLiveEcu: ((String) -> Unit)? = null
 
     private val pickIni = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) Thread { IniStore.importManual(applicationContext, uri) { emitLog(it) } }.start()
@@ -418,9 +422,11 @@ class MainActivity : AppCompatActivity() {
             if (runningJob == null) startSync()
         }
 
-        selectTab(sync = true)
-        findViewById<Button>(R.id.tabSync).setOnClickListener { selectTab(sync = true) }
-        findViewById<Button>(R.id.tabLog).setOnClickListener { selectTab(sync = false) }
+        selectTab(Tab.SYNC)
+        findViewById<Button>(R.id.tabSync).setOnClickListener { selectTab(Tab.SYNC) }
+        findViewById<Button>(R.id.tabLive).setOnClickListener { selectTab(Tab.LIVE) }
+        findViewById<Button>(R.id.tabLog).setOnClickListener { selectTab(Tab.LOG) }
+        prefs.getString("live_ecu", null)?.let { findViewById<TextView>(R.id.liveEcu).text = it }
 
         findViewById<Button>(R.id.btnCopyLog).setOnLongClickListener {
             val f = java.io.File(getExternalFilesDir(null), "minilogsync.log")
@@ -491,12 +497,15 @@ class MainActivity : AppCompatActivity() {
         uiOutcome = myOutcome
         uiChooseScope = myChooseScope
         uiDismissScope = myDismissScope
-        myLiveStats = { st -> runOnUiThread { showLiveStats(st) } }
+        myLiveStats = { st -> lastLiveStats = st; runOnUiThread { showLiveStats(st) } }
+        myLiveEcu = { text -> runOnUiThread { findViewById<TextView>(R.id.liveEcu).text = text } }
         uiLiveStats = myLiveStats
+        uiLiveEcu = myLiveEcu
         ensureDetachReceiver(this)
 
         initLogFile(this)
         restoreLog()
+        if (isLiveLogging) lastLiveStats?.let { showLiveStats(it) }
         if (isSyncing) {
             log("Reattached to a sync already in progress")
             showProgressPanel(runningJob!!)
@@ -561,6 +570,7 @@ class MainActivity : AppCompatActivity() {
         if (uiChooseScope === myChooseScope) uiChooseScope = null
         if (uiDismissScope === myDismissScope) uiDismissScope = null
         if (uiLiveStats === myLiveStats) uiLiveStats = null
+        if (uiLiveEcu === myLiveEcu) uiLiveEcu = null
         if (linkBusy) {
             // Link, worker and job are process-scoped now, so the copy carries on and
             // a recreated Activity simply reattaches to it.
@@ -665,18 +675,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Simple two-page switcher: the diagnostic log gets its own space. */
-    private fun selectTab(sync: Boolean) {
-        findViewById<android.view.View>(R.id.pageSync).visibility =
-            if (sync) android.view.View.VISIBLE else android.view.View.GONE
-        findViewById<android.view.View>(R.id.pageLog).visibility =
-            if (sync) android.view.View.GONE else android.view.View.VISIBLE
+    private enum class Tab { SYNC, LIVE, LOG }
 
+    private fun selectTab(tab: Tab) {
+        val pages = mapOf(Tab.SYNC to R.id.pageSync, Tab.LIVE to R.id.pageLive, Tab.LOG to R.id.pageLog)
+        val tabs = mapOf(Tab.SYNC to R.id.tabSync, Tab.LIVE to R.id.tabLive, Tab.LOG to R.id.tabLog)
         val on = androidx.core.content.ContextCompat.getColor(this, R.color.action_primary)
         val off = androidx.core.content.ContextCompat.getColor(this, R.color.action_neutral)
-        findViewById<Button>(R.id.tabSync).backgroundTintList =
-            android.content.res.ColorStateList.valueOf(if (sync) on else off)
-        findViewById<Button>(R.id.tabLog).backgroundTintList =
-            android.content.res.ColorStateList.valueOf(if (sync) off else on)
+        for (t in Tab.values()) {
+            findViewById<android.view.View>(pages.getValue(t)).visibility =
+                if (t == tab) android.view.View.VISIBLE else android.view.View.GONE
+            findViewById<Button>(tabs.getValue(t)).backgroundTintList =
+                android.content.res.ColorStateList.valueOf(if (t == tab) on else off)
+        }
     }
 
     private fun appVersion(): String = try {
@@ -860,7 +871,7 @@ class MainActivity : AppCompatActivity() {
      * you had left the app. A panel cannot be dismissed, and the tabs stay reachable.
      */
     private fun showProgressPanel(job: SyncJob) {
-        selectTab(sync = true)
+        selectTab(Tab.SYNC)
         dlgFile?.text = getString(R.string.progress_preparing)
         dlgName?.text = ""
         dlgDetail?.text = ""
@@ -1036,15 +1047,26 @@ class MainActivity : AppCompatActivity() {
         SyncKeepAlive.update(this, "Live logging…")
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         log("=== Live log started ===")
+        selectTab(Tab.LIVE)
+        findViewById<TextView>(R.id.liveFile).text = ""
         refresh()
         val app = applicationContext
         Thread {
             try {
-                job.run(log = { emitLog(it) }) { st ->
-                    SyncKeepAlive.update(app, "Live logging - %.0f Hz, %d samples"
-                        .format(st.hz, st.samples))
-                    uiLiveStats?.invoke(st)
-                }
+                job.run(
+                    log = { emitLog(it) },
+                    stats = { st ->
+                        SyncKeepAlive.update(app, "Live logging - %.0f Hz, %d samples"
+                            .format(st.hz, st.samples))
+                        uiLiveStats?.invoke(st)
+                    },
+                    ecu = { text ->
+                        // Remembered, so the idle Live tab says which firmware it last saw.
+                        app.getSharedPreferences("app", Context.MODE_PRIVATE).edit()
+                            .putString("live_ecu", text).apply()
+                        uiLiveEcu?.invoke(text)
+                    }
+                )
             } catch (t: Throwable) {
                 emitLog("LIVE LOG CRASHED: ${t.javaClass.simpleName}: ${t.message}")
             } finally {
@@ -1057,17 +1079,22 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
-    /** null = finished. */
+    /** null = finished; the last numbers stay on screen as the result. */
     private fun showLiveStats(st: LiveLogJob.Stats?) {
         if (st == null) {
             window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             refresh()
+            lastLiveStats?.let { showLiveStats(it) }   // repaint as "Saved"
             return
         }
-        summaryView.text = "\u25cf LIVE LOG  %.1f s  -  %d samples  -  %.0f Hz  -  %.1f MB%s\n%s".format(
-            st.seconds, st.samples, st.hz, st.bytes / 1048576.0,
-            if (st.errors > 0) "  -  ${st.errors} failed reads" else "", st.file)
-        summaryView.visibility = android.view.View.VISIBLE
+        val running = isLiveLogging
+        val mins = (st.seconds / 60).toInt()
+        val secs = st.seconds - mins * 60
+        findViewById<TextView>(R.id.liveStats).text =
+            (if (running) "\u25cf LOGGING  " else "Saved  ") + "%d:%04.1f\n".format(mins, secs) +
+            "%.0f Hz \u00b7 %d samples\n%.1f MB \u00b7 %d failed read%s".format(
+                st.hz, st.samples, st.bytes / 1048576.0, st.errors, if (st.errors == 1L) "" else "s")
+        findViewById<TextView>(R.id.liveFile).text = st.file
     }
 
     /** A plain-language result that stays on screen, instead of a buried log line. */
@@ -1107,8 +1134,30 @@ class MainActivity : AppCompatActivity() {
         destView.text = destinationUri()?.let { "Saving to: ${prettyDest(it)}" }
             ?: getString(R.string.dest_unset)
         findViewById<Button>(R.id.btnSync).isEnabled = true
-        findViewById<Button>(R.id.btnLiveLog).text = getString(
-            if (isLiveLogging) R.string.btn_live_stop else R.string.btn_live_start)
+        // Live logging and syncing are separate modes. Each tab hides the other mode's
+        // controls while it runs, instead of showing buttons that only refuse.
+        fun View.show(v: Boolean) { visibility = if (v) View.VISIBLE else View.GONE }
+        val live = isLiveLogging
+        val syncing = runningJob != null
+        findViewById<View>(R.id.syncBusyNote).show(live)
+        findViewById<View>(R.id.btnSync).show(!live && !syncing)
+        findViewById<View>(R.id.btnAdvanced).show(!live)
+        if (live) {
+            findViewById<View>(R.id.advanced).show(false)
+            findViewById<Button>(R.id.btnAdvanced).text = getString(R.string.btn_advanced_show)
+        }
+        findViewById<View>(R.id.liveBusyNote).show(syncing)
+        val liveBtn = findViewById<Button>(R.id.btnLiveLog)
+        liveBtn.show(!syncing)
+        liveBtn.text = getString(if (live) R.string.btn_live_stop else R.string.btn_live_start)
+        liveBtn.backgroundTintList = android.content.res.ColorStateList.valueOf(
+            androidx.core.content.ContextCompat.getColor(
+                this, if (live) R.color.action_danger else R.color.action_primary))
+        if (!live && lastLiveStats == null) {
+            findViewById<TextView>(R.id.liveStats).text = getString(R.string.live_idle)
+        }
+        findViewById<TextView>(R.id.liveDest).text =
+            destinationUri()?.let { "Saves to: ${prettyDest(it)}" } ?: getString(R.string.dest_unset)
         val state = when {
             runningJob != null -> getString(R.string.status_syncing)
             isLiveLogging -> getString(R.string.status_live)
