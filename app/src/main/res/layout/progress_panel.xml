@@ -3,7 +3,20 @@
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:orientation="vertical"
-    android:padding="24dp">
+    android:layout_marginTop="12dp"
+    android:padding="16dp"
+    android:background="@drawable/panel_bg">
+
+    <!-- Lives on the Sync screen, not in a dialog: a dialog could be dismissed by Back
+         or a tap outside and nothing brought it back, so progress came and went
+         depending on how the owner left the app. -->
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="12dp"
+        android:textSize="18sp"
+        android:textStyle="bold"
+        android:text="@string/dlg_title" />
 
     <!-- Hidden during the copy phase; becomes a large green banner the moment the
          ECU has its card back, so the owner knows they can leave the car. -->
@@ -27,7 +40,7 @@
         android:layout_height="wrap_content"
         android:textSize="16sp"
         android:textStyle="bold"
-        android:text="Preparing…" />
+        android:text="@string/progress_preparing" />
 
     <TextView
         android:id="@+id/dlgName"
@@ -64,4 +77,13 @@
         android:textStyle="bold"
         android:textColor="#C62828"
         android:text="@string/warn_dialog_not_logging" />
+
+    <Button
+        android:id="@+id/btnCancelSync"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:backgroundTint="@color/action_danger"
+        android:textColor="#FFFFFF"
+        android:text="@string/btn_cancel" />
 </LinearLayout>

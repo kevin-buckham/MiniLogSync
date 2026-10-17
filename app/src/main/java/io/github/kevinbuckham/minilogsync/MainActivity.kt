@@ -293,7 +293,6 @@ class MainActivity : AppCompatActivity() {
     private var myDismissScope: (() -> Unit)? = null
     private var scopeDialog: androidx.appcompat.app.AlertDialog? = null
 
-    private var progressDialog: androidx.appcompat.app.AlertDialog? = null
     private var dlgFile: TextView? = null
     private var dlgName: TextView? = null
     private var dlgDetail: TextView? = null
@@ -393,14 +392,17 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.btnDest).setOnClickListener { pickDestination.launch(null) }
 
+        // Bound once: the panel is part of this layout, unlike the old dialog.
+        dlgFile = findViewById(R.id.dlgFile)
+        dlgName = findViewById(R.id.dlgName)
+        dlgDetail = findViewById(R.id.dlgDetail)
+        dlgBar = findViewById(R.id.dlgBar)
+        dlgUnplug = findViewById(R.id.dlgUnplug)
+        dlgWarn = findViewById(R.id.dlgWarn)
+
+        // Hidden while a sync runs (the progress panel takes its place).
         findViewById<Button>(R.id.btnSync).setOnClickListener {
-            val job = runningJob
-            if (job == null) {
-                startSync()
-            } else if (progressDialog == null) {
-                showProgressDialog(job)                 // re-open after HIDE
-                lastProgress?.let { updateProgressDialog(it) }
-            }
+            if (runningJob == null) startSync()
         }
 
         selectTab(sync = true)
@@ -461,7 +463,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         myLog = { entry -> runOnUiThread { appendToView(entry) } }
-        myProgress = { p -> runOnUiThread { updateProgressDialog(p) } }
+        myProgress = { p -> runOnUiThread { updateProgressPanel(p) } }
         mySafe = { runOnUiThread { announceSafeToUnplug() } }
         myOutcome = { o -> runOnUiThread { onSyncFinished(o) } }
         myChooseScope = { options, timeoutS, answer ->
@@ -480,9 +482,9 @@ class MainActivity : AppCompatActivity() {
         restoreLog()
         if (isSyncing) {
             log("Reattached to a sync already in progress")
-            showProgressDialog(runningJob!!)
+            showProgressPanel(runningJob!!)
             if (safeAnnounced) announceSafeToUnplug()
-            lastProgress?.let { updateProgressDialog(it) }
+            lastProgress?.let { updateProgressPanel(it) }
         } else {
             log("MiniLogSync ${appVersion()} ready")
         }
@@ -524,7 +526,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        dismissProgressDialog()
         dismissScopeChooser()
         try { unregisterReceiver(usbReceiver) } catch (_: Exception) {}
         // A sync in flight owns the USB link and the card. Tearing it down here would
@@ -736,7 +737,7 @@ class MainActivity : AppCompatActivity() {
         acquireWakeLock(this)
         startWatchdog(applicationContext, job)
         SyncKeepAlive.update(this, "Starting…")
-        showProgressDialog(job)
+        showProgressPanel(job)
         log("=== Sync started ===")
         setMountedFlag(true)
         val askAbove = prefs.getInt("ask_above", DEFAULT_ASK_ABOVE)
@@ -821,7 +822,7 @@ class MainActivity : AppCompatActivity() {
 
     /** Runs on whichever Activity is alive when the sync finishes. */
     private fun onSyncFinished(result: SyncJob.Outcome) {
-        dismissProgressDialog()
+        hideProgressPanel()
         showSummary(result)
         window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         // Only clear the "not logging" state if the ECU actually confirmed it took the
@@ -831,45 +832,32 @@ class MainActivity : AppCompatActivity() {
         refresh()
     }
 
-    private fun showProgressDialog(job: SyncJob) {
-        val view = layoutInflater.inflate(R.layout.dialog_progress, null)
-        dlgFile = view.findViewById(R.id.dlgFile)
-        dlgName = view.findViewById(R.id.dlgName)
-        dlgDetail = view.findViewById(R.id.dlgDetail)
-        dlgBar = view.findViewById(R.id.dlgBar)
-        dlgUnplug = view.findViewById(R.id.dlgUnplug)
-        dlgWarn = view.findViewById(R.id.dlgWarn)
-
-        val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle(R.string.dlg_title)
-            .setView(view)
-            // Dismissible on purpose. It used to be setCancelable(false) with only a
-            // CANCEL button, so while a sync was stuck the owner could not reach the
-            // Log tab, and the only way out ALSO destroyed the evidence. Hiding leaves
-            // the sync running - progress stays in the notification and the status line.
-            .setCancelable(true)
-            .setNeutralButton(R.string.btn_hide) { d, _ ->
-                d.dismiss()
-                log("Progress hidden - the sync is still running. Tap SHOW PROGRESS to return.")
-            }
-            .setNegativeButton(R.string.btn_cancel) { _, _ ->
-                // Once the card is back with the ECU, this button is just "close" -
-                // cancelling then reported a fully successful sync as "cancelled",
-                // which teaches the owner to distrust the summary.
-                if (safeAnnounced) {
-                    log("Closed - verification continues in the background")
-                } else {
-                    job.cancel()
-                    log("Cancelling after the current chunk...")
-                }
-            }
-            .create()
-
-        dialog.show()
-        // make Cancel unmistakably the stop button
-        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE)
-            ?.setTextColor(androidx.core.content.ContextCompat.getColor(this, R.color.action_danger))
-        progressDialog = dialog
+    /**
+     * Progress lives in a panel on the Sync screen, not a dialog. The dialog was made
+     * dismissible so a stuck sync could not lock the owner out of the Log tab - but
+     * then Back or a tap outside closed it too, nothing brought it back, and progress
+     * fell back to a status-line mirror. Whether you saw the dialog depended on how
+     * you had left the app. A panel cannot be dismissed, and the tabs stay reachable.
+     */
+    private fun showProgressPanel(job: SyncJob) {
+        selectTab(sync = true)
+        dlgFile?.text = getString(R.string.progress_preparing)
+        dlgName?.text = ""
+        dlgDetail?.text = ""
+        dlgBar?.progress = 0
+        dlgUnplug?.visibility = android.view.View.GONE
+        dlgWarn?.setTextColor(androidx.core.content.ContextCompat.getColor(this, R.color.action_danger))
+        dlgWarn?.text = getString(R.string.warn_dialog_not_logging)
+        val cancel = findViewById<Button>(R.id.btnCancelSync)
+        cancel.visibility = android.view.View.VISIBLE
+        cancel.isEnabled = true
+        cancel.setOnClickListener {
+            job.cancel()
+            cancel.isEnabled = false
+            log("Cancelling after the current chunk...")
+        }
+        findViewById<android.view.View>(R.id.progressPanel).visibility = android.view.View.VISIBLE
+        findViewById<Button>(R.id.btnSync).visibility = android.view.View.GONE
     }
 
     /**
@@ -883,10 +871,9 @@ class MainActivity : AppCompatActivity() {
         dlgUnplug?.visibility = android.view.View.VISIBLE
         dlgWarn?.setTextColor(androidx.core.content.ContextCompat.getColor(this, R.color.action_primary))
         dlgWarn?.text = getString(R.string.unplug_detail)
-        progressDialog?.setTitle(R.string.unplug_ok)
-        // Cancel no longer risks anything on the car side.
-        progressDialog?.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE)
-            ?.setText(R.string.btn_close)
+        // Nothing left to cancel on the car side; verification just finishes. (As a
+        // CANCEL it reported a fully successful sync as "cancelled".)
+        findViewById<Button>(R.id.btnCancelSync).visibility = android.view.View.GONE
 
         // A buzz, so it lands even if the phone is face-down on the seat.
         runCatching {
@@ -906,22 +893,17 @@ class MainActivity : AppCompatActivity() {
         refresh()
     }
 
-    private fun updateProgressDialog(p: SyncJob.Progress?) {
+    private fun updateProgressPanel(p: SyncJob.Progress?) {
         if (p == null) return
-        // Also on the main screen, so hiding the dialog does not hide progress.
-        statusView.text = "Syncing ${p.overallPercent}%  -  file ${p.fileIndex} of " +
-            "${p.fileCount}\nbuild ${appVersion()}"
         dlgFile?.text = "File ${p.fileIndex} of ${p.fileCount}"
         dlgName?.text = p.fileName
         dlgDetail?.text = p.detail
         dlgBar?.progress = p.overallPercent.coerceIn(0, 100)
     }
 
-    private fun dismissProgressDialog() {
-        runCatching { progressDialog?.dismiss() }
-        progressDialog = null
-        dlgFile = null; dlgName = null; dlgDetail = null; dlgBar = null
-        dlgUnplug = null; dlgWarn = null
+    private fun hideProgressPanel() {
+        findViewById<android.view.View>(R.id.progressPanel).visibility = android.view.View.GONE
+        findViewById<Button>(R.id.btnSync).visibility = android.view.View.VISIBLE
     }
 
     /**
@@ -1050,9 +1032,6 @@ class MainActivity : AppCompatActivity() {
         destView.text = destinationUri()?.let { "Saving to: ${prettyDest(it)}" }
             ?: getString(R.string.dest_unset)
         findViewById<Button>(R.id.btnSync).isEnabled = true
-        findViewById<Button>(R.id.btnSync).text =
-            if (runningJob == null) getString(R.string.btn_sync)
-            else getString(R.string.btn_show_progress)
         val state = when {
             runningJob != null -> getString(R.string.status_syncing)
             !link.isOpen -> getString(R.string.status_disconnected)

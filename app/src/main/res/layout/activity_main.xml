@@ -87,6 +87,13 @@
                 android:visibility="gone"
                 android:text="" />
 
+            <include
+                android:id="@+id/progressPanel"
+                layout="@layout/progress_panel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:visibility="gone" />
+
             <Button
                 android:id="@+id/btnSync"
                 android:layout_width="match_parent"
