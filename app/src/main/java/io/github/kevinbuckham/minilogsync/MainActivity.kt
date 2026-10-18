@@ -1130,7 +1130,7 @@ class MainActivity : AppCompatActivity() {
         // warning that survives this screen closing. So: card back to the ECU first.
         if (mountedToPhone || manualMountInProcess || prefs.getBoolean("left_mounted", false)) {
             showBlocked("The card is handed to the phone, so the ECU is not logging. Return " +
-                "it to the ECU first (Sync tab > Advanced > Return card to ECU).")
+                "it to the ECU first (SD Card tab > Advanced > Return card to ECU).")
             return
         }
         // A connect, command or heal still running on the io thread owns the port; a
