@@ -15,6 +15,15 @@ import java.time.format.DateTimeParseException
  * Age comes from the filename (re_YYMMDD_HHMMSS.mlg, the ECU's RTC). A log named
  * from rusEFI's counter fallback has no date, so it is NEVER skipped: its age is
  * unknown, and silently dropping a log is the one outcome this app must not have.
+ *
+ * Cutoffs are measured back from the NEWEST dated log on the card, not from the
+ * phone's clock. rusEFI accepts any RTC year from 2016 to 2030, so a drifted clock,
+ * one set in UTC, or one stale after a battery disconnect produces names that look
+ * hours or months old against the phone - and a phone-clock cutoff would then mark
+ * the newest logs synced, permanently. Measured from the newest log, the newest log
+ * is never skipped whatever the ECU clock says; only the spacing between logs
+ * matters, and that comes from one clock. It also reads better: after a week parked,
+ * "last 2 days" is the last 2 days of driving, not nothing.
  */
 object SyncScope {
 
@@ -43,28 +52,35 @@ object SyncScope {
      */
     data class Option(val label: String, val days: Int?, val count: Int, val bytes: Long)
 
-    /** Day cutoffs offered, smallest first. 0 = "none, start from now". */
-    private val CUTOFFS = listOf(1, 2, 7, 0)
+    /**
+     * Day cutoffs offered, smallest first. There is deliberately no "none / start from
+     * now": it skipped everything dated, sat one row above the safe default in a dialog
+     * answered in a car, and its only undo re-offers every log ever copied.
+     */
+    private val CUTOFFS = listOf(1, 2, 7)
+
+    /** The newest dated log - what cutoffs are measured from; null if none is dated. */
+    fun reference(names: Collection<String>): LocalDateTime? =
+        names.mapNotNull(::logTime).maxOrNull()
 
     /**
-     * The choices for [names] (with their sizes), measured against [now].
-     * A cutoff that would copy everything anyway is left out - it is not a choice.
+     * The choices for [sizes] (name to size), measured back from [ref]. "Everything"
+     * comes FIRST - it is the default and the safe answer. A cutoff that would copy
+     * everything anyway is left out; it is not a choice.
      */
-    fun options(sizes: Map<String, Long>, now: LocalDateTime): List<Option> {
-        val all = Option("Everything", null, sizes.size, sizes.values.sum())
-        val out = mutableListOf<Option>()
+    fun options(sizes: Map<String, Long>, ref: LocalDateTime): List<Option> {
+        val out = mutableListOf(Option("Everything", null, sizes.size, sizes.values.sum()))
         for (days in CUTOFFS) {
-            val kept = sizes.filterKeys { !isTooOld(it, days, now) }
+            val kept = sizes.filterKeys { !isTooOld(it, days, ref) }
             if (kept.size == sizes.size) continue
             val label = when (days) {
-                0 -> "None - only logs made from now on"
-                1 -> "Last day"
-                7 -> "Last week"
-                else -> "Last $days days"
+                1 -> "Last day of logs"
+                7 -> "Last week of logs"
+                else -> "Last $days days of logs"
             }
             out += Option(label, days, kept.size, kept.values.sum())
         }
-        return out + all
+        return out
     }
 
     /** "Last 2 days  (6 logs, 190 MB)" */
@@ -76,10 +92,13 @@ object SyncScope {
         return "${o.label}  (${o.count} log${if (o.count == 1) "" else "s"}, $size)"
     }
 
-    /** Would a cutoff of [days] skip this log? Undated logs are never skipped. */
-    fun isTooOld(name: String, days: Int?, now: LocalDateTime): Boolean {
+    /**
+     * Would a cutoff of [days] before [ref] skip this log? Undated logs are never
+     * skipped, and with [ref] the newest dated log, neither is that one.
+     */
+    fun isTooOld(name: String, days: Int?, ref: LocalDateTime): Boolean {
         if (days == null) return false
         val t = logTime(name) ?: return false
-        return t.isBefore(now.minusDays(days.toLong()))
+        return t.isBefore(ref.minusDays(days.toLong()))
     }
 }
