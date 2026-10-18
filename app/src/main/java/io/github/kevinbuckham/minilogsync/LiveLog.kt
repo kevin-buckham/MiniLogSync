@@ -20,8 +20,16 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Custom-built firmware is not published; for that the owner loads the file by hand,
  * and it is still checked against the ECU's signature, because decoding with the
  * wrong ini silently produces plausible-looking garbage.
+ *
+ * Nothing reaches the cache unless it parsed AND its signature matched. A captive
+ * portal answering HTTP 200 with a login page, or a truncated download, used to be
+ * cached first and checked second - and the size check then served that bad file
+ * forever, with no way to recover short of a manual import.
  */
 object IniStore {
+
+    /** The real uaefi_pro ini is about 860 kB; this bounds a runaway or hostile reply. */
+    private const val MAX_INI_BYTES = 8L * 1024 * 1024
 
     private fun dir(ctx: Context) = File(ctx.filesDir, "ini").apply { mkdirs() }
 
@@ -42,9 +50,14 @@ object IniStore {
     /** Cached, else downloaded. Returns null (having logged why) when neither works. */
     fun load(ctx: Context, signature: String, log: (String) -> Unit): IniModel? {
         val cached = cacheFile(ctx, signature)
-        if (cached.length() > 10_000) {
-            log("Using cached ini for this firmware")
-            return parseChecked(cached, signature, log)
+        if (cached.exists()) {
+            val m = parseChecked(cached, signature, log)
+            if (m != null) {
+                log("Using cached ini for this firmware")
+                return m
+            }
+            log("Cached ini is unusable - discarding it and downloading again")
+            cached.delete()
         }
         val url = urlFor(signature)
         if (url == null) {
@@ -56,17 +69,30 @@ object IniStore {
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
             connectTimeout = 10_000
             readTimeout = 20_000
+            instanceFollowRedirects = false   // a redirect off rusefi.com is not the ini
         }
         return try {
-            if (conn.responseCode >= 300) {
+            if (conn.responseCode != 200) {
                 log("ini download failed: HTTP ${conn.responseCode}")
-                null
-            } else {
-                conn.inputStream.use { inp -> tmp.outputStream().use { inp.copyTo(it) } }
-                tmp.renameTo(cached)
-                log("ini cached (${cached.length() / 1024} kB)")
-                parseChecked(cached, signature, log)
+                return null
             }
+            conn.inputStream.use { inp ->
+                tmp.outputStream().use { out ->
+                    val buf = ByteArray(32 * 1024)
+                    var total = 0L
+                    while (true) {
+                        val n = inp.read(buf)
+                        if (n < 0) break
+                        total += n
+                        if (total > MAX_INI_BYTES) throw java.io.IOException("larger than 8 MB")
+                        out.write(buf, 0, n)
+                    }
+                }
+            }
+            val m = parseChecked(tmp, signature, log) ?: return null
+            if (!tmp.renameTo(cached)) tmp.copyTo(cached, overwrite = true)
+            log("ini cached (${cached.length() / 1024} kB)")
+            m
         } catch (e: Exception) {
             log("ini download failed: ${e.message} - no signal? Load the .ini by hand (Advanced)")
             null
@@ -77,30 +103,39 @@ object IniStore {
     }
 
     /** A hand-picked ini is accepted only if its signature is one we can check later. */
-    fun importManual(ctx: Context, uri: Uri, log: (String) -> Unit): Boolean = try {
+    fun importManual(ctx: Context, uri: Uri, log: (String) -> Unit): Boolean {
         val tmp = File(dir(ctx), "import.tmp")
-        ctx.contentResolver.openInputStream(uri)!!.use { inp ->
-            tmp.outputStream().use { inp.copyTo(it) }
-        }
-        val model = tmp.bufferedReader().use { IniModel.parse(it) }
-        if (model.signature.isBlank() || model.blockSize <= 0) {
-            log("That file is not a TunerStudio ini (no signature / ochBlockSize)")
-            tmp.delete()
+        return try {
+            ctx.contentResolver.openInputStream(uri)!!.use { inp ->
+                tmp.outputStream().use { inp.copyTo(it) }
+            }
+            val model = tmp.bufferedReader().use { IniModel.parse(it) }
+            if (model.signature.isBlank() || model.blockSize <= 0) {
+                log("That file is not a TunerStudio ini (no signature / ochBlockSize)")
+                false
+            } else {
+                val dest = cacheFile(ctx, model.signature)
+                if (!tmp.renameTo(dest)) tmp.copyTo(dest, overwrite = true)
+                log("ini loaded for '${model.signature}'")
+                true
+            }
+        } catch (e: Exception) {
+            log("Could not read that ini: ${e.message}")
             false
-        } else {
-            tmp.renameTo(cacheFile(ctx, model.signature))
-            log("ini loaded for '${model.signature}'")
-            true
+        } finally {
+            tmp.delete()
         }
-    } catch (e: Exception) {
-        log("Could not read that ini: ${e.message}")
-        false
     }
 
     private fun parseChecked(f: File, signature: String, log: (String) -> Unit): IniModel? {
-        val m = f.bufferedReader().use { IniModel.parse(it) }
+        val m = try {
+            f.bufferedReader().use { IniModel.parse(it) }
+        } catch (e: Exception) {
+            log("ini could not be read: ${e.message}")
+            return null
+        }
         if (m.signature != signature) {
-            log("ini signature '${m.signature}' does not match the ECU - not using it")
+            log("ini signature '${m.signature.take(80)}' does not match the ECU - not using it")
             return null
         }
         if (m.blockSize <= 0) {
@@ -112,6 +147,90 @@ object IniStore {
 }
 
 /**
+ * Datalog entries -> MLG fields, each with a decoder from the output-channel block.
+ * Separate from the job so it can be tested without a phone or an ECU.
+ */
+object LivePlan {
+
+    /** Writes one field of one record from one output-channel block. */
+    class Slot(
+        val field: MlgWriter.Field,
+        val write: (block: ByteArray, record: ByteArray, pos: Int, seconds: Float) -> Unit
+    )
+
+    class Plan(val slots: List<Slot>, val skipped: List<String>) {
+        val recordLength: Int get() = slots.sumOf { MlgWriter.sizeOf(it.field.type) }
+
+        /** Decode [block] into [record] (big-endian, field order). */
+        fun fill(block: ByteArray, record: ByteArray, seconds: Float) {
+            var pos = 0
+            for (s in slots) {
+                s.write(block, record, pos, seconds)
+                pos += MlgWriter.sizeOf(s.field.type)
+            }
+        }
+    }
+
+    fun build(ini: IniModel): Plan {
+        val slots = ArrayList<Slot>()
+        val skipped = ArrayList<String>()
+        for (e in ini.datalog) {
+            if (e.channel == "time") {
+                slots += Slot(MlgWriter.Field(e.label, "s", MlgWriter.F32, 1f, 0f, 3)) { _, rec, pos, t ->
+                    putBe(rec, pos, java.lang.Float.floatToRawIntBits(t).toLong(), 4)
+                }
+                continue
+            }
+            when (val c = ini.channels[e.channel]) {
+                is IniModel.Channel.Scalar -> {
+                    val type = MlgWriter.typeOf(c.type)
+                    val size = type?.let(MlgWriter::sizeOf)
+                    if (type == null || size == null || c.offset + size > ini.blockSize) {
+                        skipped += e.channel; continue
+                    }
+                    val off = c.offset
+                    // Same bytes, LE in the block -> BE in the log. A byte reversal is
+                    // exact for signed and float types too. Scale and translate carry over
+                    // unchanged: TS shows (raw + translate) * scale, MLG (raw + transform) * scale.
+                    slots += Slot(MlgWriter.Field(e.label, c.units, type, c.scale.toFloat(),
+                                                  c.translate.toFloat(), e.digits)) { blk, rec, pos, _ ->
+                        for (i in 0 until size) rec[pos + i] = blk[off + size - 1 - i]
+                    }
+                }
+                is IniModel.Channel.Bits -> {
+                    val size = MlgWriter.typeOf(c.type)?.let(MlgWriter::sizeOf)
+                    val width = c.hi - c.lo + 1
+                    if (size == null || c.offset + size > ini.blockSize || width !in 1..32) {
+                        skipped += e.channel; continue
+                    }
+                    val outType = when {
+                        width <= 8 -> MlgWriter.U08
+                        width <= 16 -> MlgWriter.U16
+                        else -> MlgWriter.U32
+                    }
+                    val outSize = MlgWriter.sizeOf(outType)
+                    val mask = (1L shl width) - 1
+                    val off = c.offset
+                    val lo = c.lo
+                    slots += Slot(MlgWriter.Field(e.label, "", outType, 1f, 0f, 0)) { blk, rec, pos, _ ->
+                        // Raw unsigned read: a bit field in an S32 is still just bits.
+                        var v = 0L
+                        for (i in 0 until size) v = v or ((blk[off + i].toLong() and 0xFF) shl (8 * i))
+                        putBe(rec, pos, (v ushr lo) and mask, outSize)
+                    }
+                }
+                null -> skipped += e.channel
+            }
+        }
+        return Plan(slots, skipped)
+    }
+
+    private fun putBe(rec: ByteArray, pos: Int, v: Long, size: Int) {
+        for (i in 0 until size) rec[pos + i] = (v shr (8 * (size - 1 - i))).toByte()
+    }
+}
+
+/**
  * Live datalogging over USB, the way TunerStudio does it: poll the output-channel
  * block with 'O' and write each sample as an .mlg record.
  *
@@ -119,14 +238,16 @@ object IniStore {
  * achieves (rate, errors) and to produce a file to open in MegaLogViewer; the armed
  * "log the next start" mode builds on it once those numbers are known.
  *
- * Read-only throughout: it sends only 'S' and 'O', which change nothing on the ECU,
- * and it never touches the SD card, so the ECU's own logging carries on.
+ * It sends only 'S' and 'O'. Neither changes configuration or touches the SD card,
+ * so the ECU's own logging carries on; the firmware merely counts the requests (its
+ * TS statistics), exactly as it does for TunerStudio.
  */
 class LiveLogJob(
     private val context: Context,
     private val link: EcuLink,
     private val destTree: Uri,
-    private val targetHz: Int = 100
+    /** Samples per second; null = the ini's defaultRuntimeRecordPerSec, as TunerStudio uses. */
+    private val targetHz: Int? = null
 ) {
     data class Stats(
         val seconds: Double, val samples: Long, val hz: Double,
@@ -136,22 +257,31 @@ class LiveLogJob(
     private val stopFlag = AtomicBoolean(false)
     fun stop() = stopFlag.set(true)
 
-    /** Converts one output-channel block into one MLG record. */
-    private class Slot(val field: MlgWriter.Field, val write: (ByteArray, ByteArray, Int, Float) -> Unit)
-
     /** [ecu] gets a short "which firmware, which ini" description once both are known. */
     fun run(log: (String) -> Unit, stats: (Stats) -> Unit, ecu: (String) -> Unit = {}) {
         val sigBytes = link.request(TsPacket.frame(TsPacket.CODE_HELLO, ByteArray(0)), 256, 1000)
         if (sigBytes == null) { log("ECU did not answer the signature request"); return }
         val signature = String(sigBytes, Charsets.US_ASCII).substringBefore('\u0000').trim()
         log("Firmware: $signature")
+        if (stopFlag.get()) { log("Stopped before logging began"); return }
 
         val ini = IniStore.load(context, signature, log) ?: return
+        if (stopFlag.get()) { log("Stopped before logging began"); return }
+        if (ini.warnings.isNotEmpty()) {
+            log("ini: ${ini.warnings.size} channel(s) not understood and left out: " +
+                ini.warnings.take(8).joinToString() + if (ini.warnings.size > 8) ", …" else "")
+        }
         val chunk = (if (ini.blockingFactor > 0) ini.blockingFactor else 256)
             .coerceAtMost(ini.blockSize)
-        val slots = plan(ini, log)
-        if (slots.isEmpty()) { log("No loggable channels in the ini"); return }
-        ecu("ECU: ${signature.removePrefix("rusEFI ")}\nini: matched \u2713  ${slots.size} channels, " +
+        val plan = LivePlan.build(ini)
+        if (plan.skipped.isNotEmpty()) {
+            log("Skipped ${plan.skipped.size} datalog entr${if (plan.skipped.size == 1) "y" else "ies"} " +
+                "with no plain channel: ${plan.skipped.take(12).joinToString()}" +
+                if (plan.skipped.size > 12) ", …" else "")
+        }
+        if (plan.slots.isEmpty()) { log("No loggable channels in the ini"); return }
+        val hzTarget = (targetHz ?: ini.defaultHz.takeIf { it > 0 } ?: 100).coerceIn(1, 200)
+        ecu("ECU: ${signature.removePrefix("rusEFI ")}\nini: matched ✓  ${plan.slots.size} channels, " +
             "${ini.blockSize}-byte block")
 
         val dest = DocumentFile.fromTreeUri(context, destTree)
@@ -160,10 +290,7 @@ class LiveLogJob(
         val doc = dest.createFile("application/octet-stream", name)
             ?: run { log("Could not create $name"); return }
         val raw = context.contentResolver.openOutputStream(doc.uri)
-            ?: run { log("Could not open $name"); return }
-
-        log("Logging ${slots.size} channels to $name - block ${ini.blockSize} bytes " +
-            "in ${(ini.blockSize + chunk - 1) / chunk} request(s), target $targetHz Hz")
+            ?: run { log("Could not open $name"); doc.delete(); return }
 
         val out = java.io.BufferedOutputStream(raw, 256 * 1024)
         val counting = object : java.io.FilterOutputStream(out) {
@@ -172,12 +299,21 @@ class LiveLogJob(
             override fun write(b: Int) { out.write(b); n++ }
         }
         val info = "\"MiniLogSync live log\"\n\"$signature\"\n\"Capture Date: ${Date()}\""
-        val writer = MlgWriter(counting, slots.map { it.field }, info, System.currentTimeMillis() / 1000)
+        val writer = try {
+            MlgWriter(counting, plan.slots.map { it.field }, info, System.currentTimeMillis() / 1000)
+        } catch (e: Exception) {
+            log("Could not start $name: ${e.message}")
+            runCatching { raw.close() }
+            doc.delete()
+            return
+        }
+        log("Logging ${plan.slots.size} channels to $name - block ${ini.blockSize} bytes " +
+            "in ${(ini.blockSize + chunk - 1) / chunk} request(s), target $hzTarget Hz")
+
         val record = ByteArray(writer.recordLength)
         val block = ByteArray(ini.blockSize)
-
         val t0 = System.nanoTime()
-        val periodNs = 1_000_000_000L / targetHz.coerceIn(1, 1000)
+        val periodNs = 1_000_000_000L / hzTarget
         var samples = 0L
         var errors = 0L
         var failStreakSince = 0L
@@ -185,19 +321,14 @@ class LiveLogJob(
         var windowStart = t0
         var windowSamples = 0L
         var hz = 0.0
+        var writeError: String? = null
 
         try {
             while (!stopFlag.get()) {
                 if (readBlock(ini.blockSize, chunk, block)) {
                     failStreakSince = 0L
-                    val now = System.nanoTime()
-                    val elapsedUs = (now - t0) / 1000
-                    var pos = 0
-                    val tSec = (elapsedUs / 1e6).toFloat()
-                    for (s in slots) {
-                        s.write(block, record, pos, tSec)
-                        pos += MlgWriter.sizeOf(s.field.type)
-                    }
+                    val elapsedUs = (System.nanoTime() - t0) / 1000
+                    plan.fill(block, record, (elapsedUs / 1e6).toFloat())
                     writer.writeRecord(record, elapsedUs)
                     samples++
                     windowSamples++
@@ -228,18 +359,32 @@ class LiveLogJob(
                 val ahead = next - System.nanoTime()
                 if (ahead > 1_000_000L) Thread.sleep(ahead / 1_000_000L)
             }
+        } catch (e: java.io.IOException) {
+            writeError = e.message ?: e.javaClass.simpleName
+            log("Writing $name failed: $writeError - stopping")
         } finally {
-            runCatching { counting.flush() }
-            runCatching { raw.close() }
+            // Flush and close are where a provider (Drive) reports a failed write. They
+            // used to be swallowed, and the log then said "saved" regardless.
+            try { counting.flush() } catch (e: Exception) { writeError = writeError ?: e.message }
+            try { raw.close() } catch (e: Exception) { writeError = writeError ?: e.message }
         }
         val secs = (System.nanoTime() - t0) / 1e9
         val avg = if (secs > 0) samples / secs else 0.0
         stats(Stats(secs, samples, avg, errors, counting.n, name))
-        log("Live log saved: $name - $samples samples in %.1f s (avg %.1f Hz), %d failed reads, %.1f MB"
-            .format(secs, avg, errors, counting.n / 1048576.0))
+        val summary = "$samples samples in %.1f s (avg %.1f Hz), %d failed reads, %.1f MB"
+            .format(secs, avg, errors, counting.n / 1048576.0)
+        if (writeError == null) {
+            log("Live log saved: $name - $summary")
+        } else {
+            log("*** Live log $name MAY BE INCOMPLETE: $writeError *** ($summary)")
+        }
     }
 
-    /** Whole block via one or more 'O' requests of at most [chunk] bytes each. */
+    /**
+     * Whole block via one or more 'O' requests of at most [chunk] bytes each. Any failed
+     * chunk abandons the sample; EcuLink has already waited for the line to go quiet, so
+     * a late reply cannot be taken for the next chunk's.
+     */
     private fun readBlock(size: Int, chunk: Int, into: ByteArray): Boolean {
         var off = 0
         while (off < size) {
@@ -250,61 +395,5 @@ class LiveLogJob(
             off += n
         }
         return true
-    }
-
-    /** Datalog entries -> MLG fields with a decoder each; unresolvable ones are listed. */
-    private fun plan(ini: IniModel, log: (String) -> Unit): List<Slot> {
-        val slots = ArrayList<Slot>()
-        val skipped = ArrayList<String>()
-        for (e in ini.datalog) {
-            if (e.channel == "time") {
-                slots += Slot(MlgWriter.Field(e.label, "s", MlgWriter.F32, 1f, 0f, 3)) { _, rec, pos, t ->
-                    putBe(rec, pos, java.lang.Float.floatToRawIntBits(t).toLong(), 4)
-                }
-                continue
-            }
-            when (val c = ini.channels[e.channel]) {
-                is IniModel.Channel.Scalar -> {
-                    val type = MlgWriter.typeOf(c.type)
-                    val size = type?.let(MlgWriter::sizeOf)
-                    if (type == null || size == null || c.offset + size > ini.blockSize) {
-                        skipped += e.channel; continue
-                    }
-                    val off = c.offset
-                    // Same bytes, LE in the block -> BE in the log; scale/translate
-                    // carry over unchanged because MLG applies the same formula.
-                    slots += Slot(MlgWriter.Field(e.label, c.units, type, c.scale.toFloat(),
-                                                  c.translate.toFloat(), e.digits)) { blk, rec, pos, _ ->
-                        for (i in 0 until size) rec[pos + i] = blk[off + size - 1 - i]
-                    }
-                }
-                is IniModel.Channel.Bits -> {
-                    val size = MlgWriter.typeOf(c.type)?.let(MlgWriter::sizeOf)
-                    if (size == null || c.offset + size > ini.blockSize) { skipped += e.channel; continue }
-                    val width = c.hi - c.lo + 1
-                    val outType = if (width <= 8) MlgWriter.U08 else MlgWriter.U16
-                    val outSize = MlgWriter.sizeOf(outType)
-                    val mask = (1L shl width) - 1
-                    val off = c.offset
-                    val lo = c.lo
-                    slots += Slot(MlgWriter.Field(e.label, "", outType, 1f, 0f, 0)) { blk, rec, pos, _ ->
-                        var v = 0L
-                        for (i in 0 until size) v = v or ((blk[off + i].toLong() and 0xFF) shl (8 * i))
-                        putBe(rec, pos, (v ushr lo) and mask, outSize)
-                    }
-                }
-                null -> skipped += e.channel
-            }
-        }
-        if (skipped.isNotEmpty()) {
-            log("Skipped ${skipped.size} datalog entr${if (skipped.size == 1) "y" else "ies"} " +
-                "with no plain channel: ${skipped.take(12).joinToString()}" +
-                if (skipped.size > 12) ", …" else "")
-        }
-        return slots
-    }
-
-    private fun putBe(rec: ByteArray, pos: Int, v: Long, size: Int) {
-        for (i in 0 until size) rec[pos + i] = (v shr (8 * (size - 1 - i))).toByte()
     }
 }

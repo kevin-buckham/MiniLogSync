@@ -208,6 +208,15 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        @Volatile private var lastWakeRenew = 0.0
+
+        /** Re-arm the capped wake lock (it is not reference counted, so this resets the cap). */
+        fun renewWakeLock(ctx: Context) {
+            val wl = wakeLock
+            if (wl?.isHeld == true) runCatching { wl.acquire(45 * 60 * 1000L) }
+            else acquireWakeLock(ctx)
+        }
+
         fun releaseWakeLock() {
             runCatching { wakeLock?.takeIf { it.isHeld }?.release() }
             wakeLock = null
@@ -493,6 +502,7 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.btnAskScope).setOnClickListener { editAskScopeSettings() }
         findViewById<Button>(R.id.btnLiveLog).setOnClickListener { toggleLiveLog() }
+        findViewById<Button>(R.id.btnLiveRate).setOnClickListener { chooseLiveRate() }
         findViewById<Button>(R.id.btnLoadIni).setOnClickListener { pickIni.launch(arrayOf("*/*")) }
         updateAskScopeButton()
 
@@ -1086,6 +1096,18 @@ class MainActivity : AppCompatActivity() {
     private fun toggleLiveLog() {
         liveJob?.let { it.stop(); log("Stopping live log..."); return }
         if (isSyncing) { showBlocked("Wait for the sync to finish"); return }
+        // The live log shares the one foreground notification and the wake lock. With
+        // the card handed to the phone (or logging unconfirmed) that notification IS the
+        // "ECU NOT LOGGING" alarm, and stopping the live log used to delete it - the only
+        // warning that survives this screen closing. So: card back to the ECU first.
+        if (mountedToPhone || manualMountInProcess || prefs.getBoolean("left_mounted", false)) {
+            showBlocked("The card is handed to the phone, so the ECU is not logging. Return " +
+                "it to the ECU first (Sync tab > Advanced > Return card to ECU).")
+            return
+        }
+        // A connect, command or heal still running on the io thread owns the port; a
+        // second thread on it would steal its bytes.
+        if (ioTasks.get() > 0) { showBlocked("The ECU is busy - try again in a moment"); return }
         val dest = destinationUri() ?: run { showBlocked("Choose a destination folder first"); return }
         if (!link.isOpen) {
             showBlocked("Not connected to the ECU - connecting now. Accept the USB " +
@@ -1093,7 +1115,9 @@ class MainActivity : AppCompatActivity() {
             connect()
             return
         }
-        val job = LiveLogJob(applicationContext, link, dest)
+        lastWakeRenew = 0.0
+        val job = LiveLogJob(applicationContext, link, dest,
+                             prefs.getInt("live_hz", 0).takeIf { it > 0 })
         liveJob = job
         acquireWakeLock(this)
         SyncKeepAlive.update(this, "Live logging…")
@@ -1110,6 +1134,11 @@ class MainActivity : AppCompatActivity() {
                     stats = { st ->
                         SyncKeepAlive.update(app, "Live logging - %.0f Hz, %d samples"
                             .format(st.hz, st.samples))
+                        // The wake lock caps at 45 minutes; a long live log renews it.
+                        if (st.seconds - lastWakeRenew > 60) {
+                            lastWakeRenew = st.seconds
+                            renewWakeLock(app)
+                        }
                         uiLiveStats?.invoke(st)
                     },
                     ecu = { text ->
@@ -1123,12 +1152,35 @@ class MainActivity : AppCompatActivity() {
                 emitLog("LIVE LOG CRASHED: ${t.javaClass.simpleName}: ${t.message}")
             } finally {
                 liveJob = null
-                SyncKeepAlive.stop(app)
-                releaseWakeLock()
+                // Belt and braces for the guard above: never take down a NOT-LOGGING
+                // alarm or the lock that goes with it.
+                if (!app.getSharedPreferences("app", Context.MODE_PRIVATE)
+                        .getBoolean("left_mounted", false)) {
+                    SyncKeepAlive.stop(app)
+                    releaseWakeLock()
+                }
                 emitLog("=== Live log stopped ===")
                 uiLiveStats?.invoke(null)
             }
         }.start()
+    }
+
+    /**
+     * Logging rate. Default is the ini's defaultRuntimeRecordPerSec - what TunerStudio
+     * itself uses (100 on uaefi_pro) - so the phone loads the ECU no more than the
+     * laptop does unless the owner asks for it.
+     */
+    private fun chooseLiveRate() {
+        val rates = intArrayOf(0, 10, 20, 50, 100, 200)
+        val labels = rates.map { if (it == 0) "TunerStudio default (from the ini)" else "$it Hz" }
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Live log rate")
+            .setItems(labels.toTypedArray()) { _, i ->
+                prefs.edit().putInt("live_hz", rates[i]).apply()
+                log("Live log rate: ${labels[i]} (applies to the next log)")
+                refresh()
+            }
+            .show()
     }
 
     /** null = finished; the last numbers stay on screen as the result. */
@@ -1211,6 +1263,10 @@ class MainActivity : AppCompatActivity() {
         if (!live && lastLiveStats == null) {
             findViewById<TextView>(R.id.liveStats).text = getString(R.string.live_idle)
         }
+        val hz = prefs.getInt("live_hz", 0)
+        findViewById<Button>(R.id.btnLiveRate).text =
+            "Rate: " + if (hz == 0) "TunerStudio default" else "$hz Hz"
+        findViewById<View>(R.id.btnLiveRate).show(!live && !syncing)
         findViewById<TextView>(R.id.liveDest).text =
             destinationUri()?.let { "Saves to: ${prettyDest(it)}" } ?: getString(R.string.dest_unset)
         val state = when {

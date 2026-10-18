@@ -293,6 +293,14 @@
                 android:textColor="#FFFFFF"
                 android:text="@string/btn_live_start" />
 
+            <Button
+                android:id="@+id/btnLiveRate"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:backgroundTint="@color/action_neutral"
+                android:textColor="#FFFFFF" />
+
             <TextView
                 android:id="@+id/liveDest"
                 android:layout_width="match_parent"

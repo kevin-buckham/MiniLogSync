@@ -22,7 +22,11 @@ data class IniModel(
     val blockSize: Int,
     val blockingFactor: Int,
     val channels: Map<String, Channel>,
-    val datalog: List<LogEntry>
+    val datalog: List<LogEntry>,
+    /** [TunerStudio] defaultRuntimeRecordPerSec - TunerStudio's own logging rate; 0 if absent. */
+    val defaultHz: Int = 0,
+    /** Channels that were present but not understood, so they are not silently mis-decoded. */
+    val warnings: List<String> = emptyList()
 ) {
     sealed class Channel {
         /** TS semantics: value = (raw + translate) * scale - the same as MLG's transform. */
@@ -44,6 +48,8 @@ data class IniModel(
             var blockingFactor = 0
             val channels = HashMap<String, Channel>()
             val datalog = ArrayList<LogEntry>()
+            var defaultHz = 0
+            val warnings = ArrayList<String>()
 
             reader.forEachLine { raw ->
                 val line = stripComment(raw).trim()
@@ -58,33 +64,45 @@ data class IniModel(
                 val value = line.substring(eq + 1).trim()
 
                 when (section) {
-                    "TunerStudio" -> if (key == "signature") signature = unquote(value)
+                    "TunerStudio" -> when (key) {
+                        "signature" -> signature = unquote(value)
+                        "defaultRuntimeRecordPerSec" -> defaultHz = value.toIntOrNull() ?: 0
+                    }
                     "Constants" -> if (key == "blockingFactor") {
                         blockingFactor = value.toIntOrNull() ?: 0
                     }
                     "OutputChannels" -> when (key) {
                         "ochBlockSize" -> blockSize = value.toIntOrNull() ?: 0
-                        else -> parseChannel(value)?.let { channels[key] = it }
+                        else -> parseChannel(key, value, warnings)?.let { channels[key] = it }
                     }
                     "Datalog" -> if (key == "entry") parseEntry(value)?.let { datalog += it }
                 }
             }
-            return IniModel(signature, blockSize, blockingFactor, channels, datalog)
+            return IniModel(signature, blockSize, blockingFactor, channels, datalog, defaultHz, warnings)
         }
 
-        private fun parseChannel(value: String): Channel? {
+        private fun parseChannel(name: String, value: String, warnings: MutableList<String>): Channel? {
             val f = splitFields(value)
             if (f.size < 3) return null
             val type = f[1]
             val offset = f[2].toIntOrNull() ?: return null
             return when (f[0]) {
-                "scalar" -> Channel.Scalar(
-                    type, offset,
-                    units = f.getOrNull(3)?.let(::unquote)?.takeUnless { it.startsWith("{") } ?: "",
+                "scalar" -> {
                     // Some scalars stop after the offset; TS then uses scale 1, translate 0.
-                    scale = f.getOrNull(4)?.toDoubleOrNull() ?: 1.0,
-                    translate = f.getOrNull(5)?.toDoubleOrNull() ?: 0.0
-                )
+                    // A scale that is present but not a number (an expression) is NOT
+                    // defaulted to 1 - that would log a plausible, wrongly scaled value.
+                    val scale = number(f.getOrNull(4), 1.0)
+                    val translate = number(f.getOrNull(5), 0.0)
+                    if (scale == null || translate == null) {
+                        warnings += "$name (non-numeric scale/translate)"
+                        return null
+                    }
+                    Channel.Scalar(
+                        type, offset,
+                        units = f.getOrNull(3)?.let(::unquote)?.takeUnless { it.startsWith("{") } ?: "",
+                        scale = scale, translate = translate
+                    )
+                }
                 "bits" -> {
                     val range = f.getOrNull(3)?.trim('[', ']')?.split(':') ?: return null
                     val lo = range.getOrNull(0)?.toIntOrNull() ?: return null
@@ -94,6 +112,10 @@ data class IniModel(
                 else -> null
             }
         }
+
+        /** Absent -> [default]; present but not a number -> null. */
+        private fun number(s: String?, default: Double): Double? =
+            if (s.isNullOrBlank()) default else s.toDoubleOrNull()
 
         private fun parseEntry(value: String): LogEntry? {
             val f = splitFields(value)

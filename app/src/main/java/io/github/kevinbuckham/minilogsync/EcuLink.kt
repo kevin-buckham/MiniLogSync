@@ -39,7 +39,8 @@ class EcuLink(private val context: Context) {
     private val usbManager get() =
         context.getSystemService(Context.USB_SERVICE) as UsbManager
 
-    private var port: UsbSerialPort? = null
+    // Volatile: the live-log thread reads it while the main thread may close the link.
+    @Volatile private var port: UsbSerialPort? = null
     private var lastDevice: UsbDevice? = null
 
     val isOpen: Boolean get() = port != null
@@ -230,15 +231,19 @@ class EcuLink(private val context: Context) {
     }
 
     /**
-     * A READ-ONLY TunerStudio request, for live logging: the firmware signature ('S')
+     * A query-only TunerStudio request, for live logging: the firmware signature ('S')
      * or a slice of the output-channel block ('O'). Anything else is refused here, so
-     * this cannot become a back door around the three-command rule above - neither
-     * code changes ECU state, which is why TunerStudio polls them continuously.
+     * this cannot become a back door around the three-command rule above. Neither code
+     * changes configuration or the SD card - the firmware only bumps its own request
+     * counters - which is why TunerStudio polls them continuously.
      *
      * Returns the reply payload after the status byte, or null on a missing, short,
      * corrupt or non-OK reply. Unlike sendCommand there is no drain up front: an empty
      * drain costs a 50 ms read timeout, which at three requests per sample would cap
-     * logging near 6 Hz. Instead a failed request drains, so the next one starts clean.
+     * logging near 6 Hz. Instead a failed request waits for the line to go QUIET, so
+     * the next one starts clean: replies carry no sequence number, so a late reply to
+     * one chunk is the same size as the next chunk's reply and has a valid CRC - only
+     * draining it entirely stops it being stitched into the wrong place in a sample.
      */
     fun request(frame: ByteArray, maxPayload: Int, timeoutMs: Int = 500): ByteArray? {
         val code = frame.getOrNull(2)
@@ -268,14 +273,23 @@ class EcuLink(private val context: Context) {
                     total += take
                 }
             }
-            if (want < 0 || total < want) { drain(p); return null }
+            if (want < 0 || total < want) { drainUntilQuiet(p); return null }
             val bodyLen = want - 6
             val crc = java.util.zip.CRC32().apply { update(buf, 2, bodyLen) }.value.toInt()
             val got = java.nio.ByteBuffer.wrap(buf, 2 + bodyLen, 4).int
-            if (crc != got || buf[2] != TsPacket.RESPONSE_OK) { drain(p); return null }
+            if (crc != got || buf[2] != TsPacket.RESPONSE_OK) { drainUntilQuiet(p); return null }
             buf.copyOfRange(3, 2 + bodyLen)
         } catch (e: Exception) {
             null
+        }
+    }
+
+    /** Read until nothing has arrived for 150 ms (at most 1.5 s), discarding it all. */
+    private fun drainUntilQuiet(p: UsbSerialPort) {
+        val deadline = System.currentTimeMillis() + 1500
+        while (System.currentTimeMillis() < deadline) {
+            val n = try { p.read(rxChunk, 150) } catch (_: Exception) { 0 }
+            if (n <= 0) return
         }
     }
 
