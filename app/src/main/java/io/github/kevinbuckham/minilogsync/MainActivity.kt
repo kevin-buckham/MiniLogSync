@@ -105,7 +105,7 @@ class MainActivity : AppCompatActivity() {
 
         /** Shows the "how far back?" chooser on the live Activity; see askScope. */
         @Volatile private var uiChooseScope:
-            ((List<SyncScope.Option>, Int, (SyncScope.Option) -> Unit) -> Unit)? = null
+            ((List<SyncScope.Option>, String, Int, (SyncScope.Option) -> Unit) -> Unit)? = null
         @Volatile private var uiDismissScope: (() -> Unit)? = null
 
         const val DEFAULT_ASK_ABOVE = 10
@@ -118,7 +118,8 @@ class MainActivity : AppCompatActivity() {
          * No Activity alive means nobody to ask: copy everything at once.
          */
         fun askScope(
-            app: Context, job: SyncJob, options: List<SyncScope.Option>, timeoutS: Int
+            app: Context, job: SyncJob, options: List<SyncScope.Option>,
+            newest: java.time.LocalDateTime, timeoutS: Int
         ): SyncScope.Option {
             val everything = options.first()
             val ui = uiChooseScope ?: return everything
@@ -128,7 +129,8 @@ class MainActivity : AppCompatActivity() {
                 app, "${everything.count} new logs - choose how far back in the app " +
                     "(copying all in $timeoutS s)", -1, safe = false
             )
-            ui(options, timeoutS) { o -> if (answer.compareAndSet(null, o)) latch.countDown() }
+            val shown = newest.format(java.time.format.DateTimeFormatter.ofPattern("d MMM yyyy HH:mm"))
+            ui(options, shown, timeoutS) { o -> if (answer.compareAndSet(null, o)) latch.countDown() }
             // A little slack past the dialog's own countdown, which answers itself.
             val deadline = System.currentTimeMillis() + timeoutS * 1000L + 2000L
             while (!job.cancelled.get() && System.currentTimeMillis() < deadline) {
@@ -207,6 +209,15 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        @Volatile private var lastWakeRenew = 0.0
+
+        /** Re-arm the capped wake lock (it is not reference counted, so this resets the cap). */
+        fun renewWakeLock(ctx: Context) {
+            val wl = wakeLock
+            if (wl?.isHeld == true) runCatching { wl.acquire(45 * 60 * 1000L) }
+            else acquireWakeLock(ctx)
+        }
+
         fun releaseWakeLock() {
             runCatching { wakeLock?.takeIf { it.isHeld }?.release() }
             wakeLock = null
@@ -242,8 +253,12 @@ class MainActivity : AppCompatActivity() {
                         prefs.edit().putBoolean("left_mounted", true).apply()
                         SyncKeepAlive.update(
                             app, "CABLE PULLED WHILE MOUNTED - the ECU is NOT LOGGING. "
-                                + "Reconnect and tap 'Force ECU logging'.", -1, safe = false
+                                + "Reconnect and tap 'Force ECU logging'.", -1, safe = false,
+                            alarm = true
                         )
+                        // A manual mount is over once the cable is out: on reconnect the
+                        // heal must be allowed to give the card back.
+                        manualMountInProcess = false
                     }
                 }
             }
@@ -313,7 +328,7 @@ class MainActivity : AppCompatActivity() {
     private var mySafe: (() -> Unit)? = null
     private var myOutcome: ((SyncJob.Outcome) -> Unit)? = null
     private var myChooseScope:
-        ((List<SyncScope.Option>, Int, (SyncScope.Option) -> Unit) -> Unit)? = null
+        ((List<SyncScope.Option>, String, Int, (SyncScope.Option) -> Unit) -> Unit)? = null
     private var myDismissScope: (() -> Unit)? = null
     private var scopeDialog: androidx.appcompat.app.AlertDialog? = null
 
@@ -339,6 +354,7 @@ class MainActivity : AppCompatActivity() {
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                     log("ECU detached")
                     link.close()
+                    manualMountInProcess = false   // see ensureDetachReceiver
                     if (mountedToPhone) {
                         // Cable pulled while mounted: the ECU keeps the PC mode until told
                         // otherwise, so remind loudly. Spec section 7.
@@ -387,9 +403,10 @@ class MainActivity : AppCompatActivity() {
                     acquireWakeLock(this)
                     SyncKeepAlive.update(
                         this, "Card is handed to the phone - THE ECU IS NOT LOGGING. "
-                            + "Tap 'Return card to ECU' before driving.", -1, safe = false
+                            + "Tap 'Return card to ECU' before driving.", -1, safe = false,
+                        alarm = true
                     )
-                    log("Card handed to phone. Open Files to copy logs.")
+                    if (ok) log("Card handed to phone. Open Files to copy logs.")
                     log("*** THE ECU IS NOT LOGGING until you tap 'Return card to ECU' ***")
                 }
             }
@@ -403,6 +420,7 @@ class MainActivity : AppCompatActivity() {
                     setMountedFlag(false)
                     if (!isSyncing) {
                         SyncKeepAlive.stop(this)
+                        SyncKeepAlive.clearWarning(this)
                         releaseWakeLock()
                     }
                     log("Card returned to ECU - logging resumed.")
@@ -418,6 +436,7 @@ class MainActivity : AppCompatActivity() {
                     setMountedFlag(false)
                     if (!isSyncing) {
                         SyncKeepAlive.stop(this)
+                        SyncKeepAlive.clearWarning(this)
                         releaseWakeLock()
                     }
                     log("Card explicitly assigned to ECU logging.")
@@ -501,8 +520,8 @@ class MainActivity : AppCompatActivity() {
         myProgress = { p -> runOnUiThread { updateProgressPanel(p) } }
         mySafe = { runOnUiThread { announceSafeToUnplug() } }
         myOutcome = { o -> runOnUiThread { onSyncFinished(o) } }
-        myChooseScope = { options, timeoutS, answer ->
-            runOnUiThread { showScopeChooser(options, timeoutS, answer) }
+        myChooseScope = { options, newest, timeoutS, answer ->
+            runOnUiThread { showScopeChooser(options, newest, timeoutS, answer) }
         }
         myDismissScope = { runOnUiThread { dismissScopeChooser() } }
         uiLog = myLog
@@ -762,6 +781,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startSync() {
+        // A heal or command still queued on io would run first and its UI callback would
+        // then clear left_mounted while the sync holds the card.
+        if (ioTasks.get() > 0) { showBlocked("The ECU is busy - try again in a moment"); return }
         val dest = destinationUri()
         if (dest == null) {
             showBlocked("Choose a destination folder first")
@@ -791,6 +813,7 @@ class MainActivity : AppCompatActivity() {
         setMountedFlag(true)
         val askAbove = prefs.getInt("ask_above", DEFAULT_ASK_ABOVE)
         val askTimeoutS = prefs.getInt("ask_timeout_s", DEFAULT_ASK_TIMEOUT_S)
+        var lastWakeRenewMs = System.currentTimeMillis()
         io.execute {
             val app = applicationContext
             // isSyncing is process-scoped now, so a throw escaping here would wedge it
@@ -804,6 +827,14 @@ class MainActivity : AppCompatActivity() {
                 dest,
                 log = { line -> emitLog(line) },
                 progress = { p ->
+                    // The wake lock caps at 45 minutes and a big first sync can take
+                    // longer; without renewal the device could sleep mid-copy with the
+                    // card still handed to the phone.
+                    val nowMs = System.currentTimeMillis()
+                    if (nowMs - lastWakeRenewMs > 60_000) {
+                        lastWakeRenewMs = nowMs
+                        renewWakeLock(app)
+                    }
                     if (p != null) {
                         SyncKeepAlive.update(
                             app, "${p.fileName}  (${p.fileIndex} of ${p.fileCount})",
@@ -819,7 +850,7 @@ class MainActivity : AppCompatActivity() {
                     uiSafeToUnplug?.invoke()
                 },
                 askAbove = askAbove,
-                chooseScope = { options -> askScope(app, job, options, askTimeoutS) }
+                chooseScope = { options, newest -> askScope(app, job, options, newest, askTimeoutS) }
                 )
             } catch (t: Throwable) {
                 emitLog("SYNC CRASHED: ${t.javaClass.simpleName}: ${t.message}")
@@ -835,6 +866,8 @@ class MainActivity : AppCompatActivity() {
                 stopWatchdog()
             }
             val result = outcome ?: SyncJob.Outcome(0, 0, 1, cancelled = true, restored = false)
+            // The sync's own restore also returns a card the owner had mounted by hand.
+            if (result.restored) manualMountInProcess = false
             // HIGH: stopping the service unconditionally deleted the ONLY warning
             // channel that survives Activity death. If logging was not confirmed the
             // notification must STAY, saying so - otherwise the progress notification
@@ -842,10 +875,11 @@ class MainActivity : AppCompatActivity() {
             // ECU mounted and not logging.
             if (result.restored) {
                 SyncKeepAlive.stop(app)
+                SyncKeepAlive.clearWarning(app)
             } else {
                 SyncKeepAlive.update(
                     app, "ECU LOGGING NOT CONFIRMED - reopen the app and tap "
-                        + "'Force ECU logging' before driving", -1, safe = false
+                        + "'Force ECU logging' before driving", -1, safe = false, alarm = true
                 )
             }
             releaseWakeLock()
@@ -961,7 +995,8 @@ class MainActivity : AppCompatActivity() {
      * ECU is not logging while this is up.
      */
     private fun showScopeChooser(
-        options: List<SyncScope.Option>, timeoutS: Int, answer: (SyncScope.Option) -> Unit
+        options: List<SyncScope.Option>, newest: String, timeoutS: Int,
+        answer: (SyncScope.Option) -> Unit
     ) {
         dismissScopeChooser()
         val everything = options.first()
@@ -970,7 +1005,8 @@ class MainActivity : AppCompatActivity() {
         if (isFinishing || isDestroyed) { answer(everything); return }
         val handler = android.os.Handler(mainLooper)
         var left = timeoutS
-        fun title() = "${everything.count} new logs - copying all in ${left}s"
+        // The newest log's date by the ECU clock: if it looks wrong, so would the cutoffs.
+        fun title() = "${everything.count} new logs, newest $newest - copying all in ${left}s"
 
         val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle(title())

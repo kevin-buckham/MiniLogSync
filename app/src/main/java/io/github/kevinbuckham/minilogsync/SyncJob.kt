@@ -78,7 +78,7 @@ class SyncJob(
         progress: (Progress?) -> Unit = {},
         onSafeToUnplug: () -> Unit = {},
         askAbove: Int = Int.MAX_VALUE,
-        chooseScope: ((List<SyncScope.Option>) -> SyncScope.Option)? = null
+        chooseScope: ((List<SyncScope.Option>, java.time.LocalDateTime) -> SyncScope.Option)? = null
     ): Outcome {
         var copied = 0
         var skipped = 0
@@ -313,7 +313,7 @@ class SyncJob(
      */
     private fun applyScope(
         todo: List<me.jahnen.libaums.core.fs.UsbFile>,
-        chooseScope: (List<SyncScope.Option>) -> SyncScope.Option,
+        chooseScope: (List<SyncScope.Option>, java.time.LocalDateTime) -> SyncScope.Option,
         log: (String) -> Unit
     ): List<me.jahnen.libaums.core.fs.UsbFile> {
         // Measured from the newest log, never the phone clock - see SyncScope.
@@ -322,7 +322,10 @@ class SyncJob(
         if (options.size < 2) return todo                 // nothing old enough to skip
         log("${todo.size} new logs, newest dated $ref by the ECU clock - asking how far back")
         alive()
-        val choice = chooseScope(options)
+        // The dialog shows `ref` - the newest log's date BY THE ECU CLOCK - so a clock
+        // that jumped (a future-dated outlier, or a reset after a battery disconnect)
+        // is visible to the owner before anything is skipped.
+        val choice = chooseScope(options, ref)
         alive()
         if (!active()) return todo                        // cancelled while asking
         if (choice.days == null) {

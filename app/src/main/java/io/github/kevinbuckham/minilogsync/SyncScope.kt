@@ -78,7 +78,10 @@ object SyncScope {
                 7 -> "Last week of logs"
                 else -> "Last $days days of logs"
             }
-            out += Option(label, days, kept.size, kept.values.sum())
+            val opt = Option(label, days, kept.size, kept.values.sum())
+            // Two cutoffs that keep the same logs are one choice; show the wider window.
+            if (out.size > 1 && out.last().count == opt.count) out[out.size - 1] = opt
+            else out += opt
         }
         return out
     }
