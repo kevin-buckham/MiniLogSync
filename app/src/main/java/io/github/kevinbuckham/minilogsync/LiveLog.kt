@@ -41,6 +41,8 @@ object IniStore {
         if (!signature.startsWith("rusEFI ")) return null
         val p = signature.removePrefix("rusEFI ").split('.')
         if (p.size < 6) return null
+        // The signature comes from the ECU; never let it put '/', '..' or '?' in a URL.
+        if (p.any { !it.matches(Regex("[A-Za-z0-9_-]+")) }) return null
         val n = p.size
         val branch = p.subList(0, n - 5).joinToString(".")
         return "https://rusefi.com/online/ini/rusefi/$branch/${p[n - 5]}/${p[n - 4]}/" +
@@ -66,12 +68,13 @@ object IniStore {
         }
         log("Downloading ini: $url")
         val tmp = File(cached.path + ".tmp")
-        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 10_000
-            readTimeout = 20_000
-            instanceFollowRedirects = false   // a redirect off rusefi.com is not the ini
-        }
+        var conn: HttpURLConnection? = null
         return try {
+            conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 10_000
+                readTimeout = 20_000
+                instanceFollowRedirects = false   // a redirect off rusefi.com is not the ini
+            }
             if (conn.responseCode != 200) {
                 log("ini download failed: HTTP ${conn.responseCode}")
                 return null
@@ -98,7 +101,7 @@ object IniStore {
             null
         } finally {
             tmp.delete()
-            conn.disconnect()
+            conn?.disconnect()
         }
     }
 
@@ -200,7 +203,9 @@ object LivePlan {
                 is IniModel.Channel.Bits -> {
                     val size = MlgWriter.typeOf(c.type)?.let(MlgWriter::sizeOf)
                     val width = c.hi - c.lo + 1
-                    if (size == null || c.offset + size > ini.blockSize || width !in 1..32) {
+                    // Bits must lie inside their storage type, or the value is silently cut.
+                    if (size == null || c.offset + size > ini.blockSize || width !in 1..32 ||
+                        c.lo < 0 || c.hi >= size * 8) {
                         skipped += e.channel; continue
                     }
                     val outType = when {
@@ -259,7 +264,13 @@ class LiveLogJob(
 
     /** [ecu] gets a short "which firmware, which ini" description once both are known. */
     fun run(log: (String) -> Unit, stats: (Stats) -> Unit, ecu: (String) -> Unit = {}) {
-        val sigBytes = link.request(TsPacket.frame(TsPacket.CODE_HELLO, ByteArray(0)), 256, 1000)
+        // A few tries: stale bytes on the line make the first request fail (and drain).
+        var sigBytes: ByteArray? = null
+        for (attempt in 1..3) {
+            if (stopFlag.get()) break
+            sigBytes = link.request(TsPacket.frame(TsPacket.CODE_HELLO, ByteArray(0)), 256, 1000)
+            if (sigBytes != null) break
+        }
         if (sigBytes == null) { log("ECU did not answer the signature request"); return }
         val signature = String(sigBytes, Charsets.US_ASCII).substringBefore('\u0000').trim()
         log("Firmware: $signature")

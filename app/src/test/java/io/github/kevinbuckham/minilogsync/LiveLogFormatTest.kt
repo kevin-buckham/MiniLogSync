@@ -73,6 +73,8 @@ class LiveLogFormatTest {
             IniStore.urlFor("rusEFI master.2026.10.17.uaefi_pro.1333794255"))
         assertNull(IniStore.urlFor("speeduino 202501"))
         assertNull(IniStore.urlFor("rusEFI custom"))
+        assertNull(IniStore.urlFor("rusEFI master.2026.10.17.../../x.123"))
+        assertNull(IniStore.urlFor("rusEFI master.2026.10.17.uaefi_pro.1?x=1"))
     }
 
     @Test fun outputRequestIsLittleEndianAndFramed() {
@@ -138,9 +140,10 @@ class LiveLogFormatTest {
         assertTrue(SyncScope.isTooOld("re_261015_070000.mlg", 2, ref))
         assertTrue(!SyncScope.isTooOld("re_0042.mlg", 1, ref))
         val opts = SyncScope.options(sizes, ref)
-        // Everything FIRST (the safe default), no "none" option.
-        assertEquals(listOf(null, 1, 2, 7), opts.map { it.days })
-        assertEquals(listOf(5, 3, 3, 4), opts.map { it.count })
+        // Everything FIRST (the safe default), no "none" option, and 1 day / 2 days keep
+        // the same 3 logs so they collapse into one choice (the wider window).
+        assertEquals(listOf(null, 2, 7), opts.map { it.days })
+        assertEquals(listOf(5, 3, 4), opts.map { it.count })
         assertEquals(listOf("re_261017_080000.mlg", "re_261016_090000.mlg", "re_261015_070000.mlg",
                             "re_261001_080000.mlg", "re_0042.mlg"),
                      SyncScope.newestFirst(sizes.keys.toList()) { it })
@@ -180,13 +183,14 @@ class LiveLogFormatTest {
                 "flag" to IniModel.Channel.Bits("U32", 12, 3, 3),
                 "state" to IniModel.Channel.Bits("S32", 12, 4, 6),
                 "wide" to IniModel.Channel.Bits("U32", 12, 0, 19),
-                "beyond" to IniModel.Channel.Scalar("U32", 30, "", 1.0, 0.0)
+                "beyond" to IniModel.Channel.Scalar("U32", 30, "", 1.0, 0.0),
+                "tooWide" to IniModel.Channel.Bits("U16", 12, 0, 19)
             ),
             datalog = listOf("time", "neg", "f", "u32", "s08", "flag", "state", "wide",
-                             "beyond", "expr").map { IniModel.LogEntry(it, it, 2) }
+                             "beyond", "expr", "tooWide").map { IniModel.LogEntry(it, it, 2) }
         )
         val plan = LivePlan.build(ini)
-        assertEquals(listOf("beyond", "expr"), plan.skipped)
+        assertEquals(listOf("beyond", "expr", "tooWide"), plan.skipped)
         assertEquals(listOf(MlgWriter.F32, MlgWriter.S16, MlgWriter.F32, MlgWriter.U32, MlgWriter.S08,
                             MlgWriter.U08, MlgWriter.U08, MlgWriter.U32),
                      plan.slots.map { it.field.type })

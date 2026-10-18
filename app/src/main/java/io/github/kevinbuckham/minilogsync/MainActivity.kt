@@ -552,7 +552,8 @@ class MainActivity : AppCompatActivity() {
         uiOutcome = myOutcome
         uiChooseScope = myChooseScope
         uiDismissScope = myDismissScope
-        myLiveStats = { st -> lastLiveStats = st; runOnUiThread { showLiveStats(st) } }
+        // null means "finished": keep the last numbers, which are the run's result.
+        myLiveStats = { st -> if (st != null) lastLiveStats = st; runOnUiThread { showLiveStats(st) } }
         myLiveEcu = { text -> runOnUiThread { findViewById<TextView>(R.id.liveEcu).text = text } }
         uiLiveStats = myLiveStats
         uiLiveEcu = myLiveEcu
@@ -1154,6 +1155,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.liveFile).text = ""
         refresh()
         val app = applicationContext
+        val startedAt = System.currentTimeMillis()
         Thread {
             try {
                 job.run(
@@ -1179,6 +1181,10 @@ class MainActivity : AppCompatActivity() {
                 emitLog("LIVE LOG CRASHED: ${t.javaClass.simpleName}: ${t.message}")
             } finally {
                 liveJob = null
+                // Stopping a foreground service before it has called startForeground
+                // (Stop tapped during the first request) crashes the app on Android 12+.
+                val young = 1500 - (System.currentTimeMillis() - startedAt)
+                if (young > 0) runCatching { Thread.sleep(young) }
                 // Belt and braces for the guard above: never take down a NOT-LOGGING
                 // alarm or the lock that goes with it.
                 if (!app.getSharedPreferences("app", Context.MODE_PRIVATE)
