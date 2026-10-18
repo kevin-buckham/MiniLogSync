@@ -65,6 +65,28 @@ class MainActivity : AppCompatActivity() {
         private val io = Executors.newSingleThreadExecutor()
         @Volatile private var runningJob: SyncJob? = null
 
+        /**
+         * Short USB tasks in flight on [io] (connect, a manual command, the heal). They
+         * own the port while they run, so nothing may release it underneath them -
+         * onStop doing so mid-open orphaned an open port on a discarded EcuLink.
+         */
+        private val ioTasks = java.util.concurrent.atomic.AtomicInteger(0)
+
+        private fun runIo(task: () -> Unit) {
+            ioTasks.incrementAndGet()
+            io.execute { try { task() } finally { ioTasks.decrementAndGet() } }
+        }
+
+        /**
+         * A manual mount made by THIS process. The left_mounted flag cannot tell a card
+         * the owner deliberately handed to the phone (and is copying from in Files) from
+         * one a dead process left behind - so a recreated Activity healed it, sending
+         * `sdmode auto` mid-copy: the same bug the sync once had. Process-scoped, so it
+         * survives Activity recreation and is gone after a process death, when healing
+         * IS right.
+         */
+        @Volatile private var manualMountInProcess = false
+
         /** Last lines of the log, so Activity recreation does not lose the history. */
         private val logBuffer = ArrayDeque<String>()
         private const val LOG_MAX = 400
@@ -98,7 +120,7 @@ class MainActivity : AppCompatActivity() {
         fun askScope(
             app: Context, job: SyncJob, options: List<SyncScope.Option>, timeoutS: Int
         ): SyncScope.Option {
-            val everything = options.last()
+            val everything = options.first()
             val ui = uiChooseScope ?: return everything
             val answer = java.util.concurrent.atomic.AtomicReference<SyncScope.Option?>(null)
             val latch = java.util.concurrent.CountDownLatch(1)
@@ -170,7 +192,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         fun acquireWakeLock(ctx: Context) {
-            if (wakeLock != null) return
+            // isHeld, not != null: the lock auto-expires at its cap, and a stale non-null
+            // reference used to make the next sync run with no wake lock at all.
+            if (wakeLock?.isHeld == true) return
             runCatching {
                 val pm = ctx.applicationContext
                     .getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
@@ -343,7 +367,16 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.btnMount).setOnClickListener {
             send(EcuLink.CMD_MOUNT_PHONE) { ok ->
-                if (ok) {
+                // Not acknowledged is NOT "did not execute": this ECU drops about one
+                // command in three, and SyncJob already treats a lost mount ACK as a
+                // possible mount. The manual path set no flag, no notification and no
+                // heal in that case - the ECU could sit not logging with nothing saying so.
+                if (!ok) {
+                    warn("Mount was not acknowledged - it may still have happened. Treating " +
+                        "the card as handed to the phone; tap 'Return card to ECU' before driving.")
+                }
+                run {
+                    manualMountInProcess = true
                     mountedToPhone = true
                     setMountedFlag(true)
                     // Everything built for the sync flow - the keep-alive, the detach
@@ -365,6 +398,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnRestore).setOnClickListener {
             send(EcuLink.CMD_RESTORE_AUTO) { ok ->
                 if (ok) {
+                    manualMountInProcess = false
                     mountedToPhone = false
                     setMountedFlag(false)
                     if (!isSyncing) {
@@ -379,6 +413,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnRestoreEcu).setOnClickListener {
             send(EcuLink.CMD_RESTORE_ECU) { ok ->
                 if (ok) {
+                    manualMountInProcess = false
                     mountedToPhone = false
                     setMountedFlag(false)
                     if (!isSyncing) {
@@ -519,7 +554,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun releaseIdleLink() {
-        if (isSyncing) return
+        if (isSyncing || ioTasks.get() > 0) return
         runCatching { sharedLink?.close() }
         sharedLink = null
     }
@@ -571,7 +606,7 @@ class MainActivity : AppCompatActivity() {
             link.requestPermission(device)
             return
         }
-        io.execute {
+        runIo {
             val msg = link.open(device)
             runOnUiThread {
                 log(msg)
@@ -582,6 +617,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun send(command: String, onDone: (Boolean) -> Unit) {
+        // Refuse, do not queue: io is single-threaded and the sync holds it, so a command
+        // tapped mid-sync used to run AFTER it - a Mount landing after "SAFE TO UNPLUG",
+        // leaving the ECU not logging once the owner had been told it was fine.
+        if (isSyncing) {
+            showBlocked("A sync is running - card commands are disabled until it finishes")
+            return
+        }
         if (!link.isOpen) {
             // Shown, not just logged: a silent no-op on "Return card to ECU" reads as
             // success, and the owner drives away with the ECU not logging.
@@ -591,7 +633,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         log("-> $command")
-        io.execute {
+        runIo {
             val r = link.sendCommand(command)
             runOnUiThread {
                 log(r.message + if (r.raw.isNotEmpty()) "   [${r.raw}]" else "")
@@ -683,11 +725,18 @@ class MainActivity : AppCompatActivity() {
             return
         }
         if (!prefs.getBoolean("left_mounted", false)) return
+        if (manualMountInProcess) {
+            mountedToPhone = true
+            log("Card is still handed to the phone (manual mount) - not taking it back")
+            refresh()
+            return
+        }
         log("Previous session may have left the ECU not logging - restoring...")
-        io.execute {
+        runIo {
             val r = link.sendCommand(EcuLink.CMD_RESTORE_AUTO, attempts = 3)
             runOnUiThread {
                 if (r.ok) {
+                    manualMountInProcess = false
                     setMountedFlag(false)
                     mountedToPhone = false
                     log("Recovered: ECU logging restored")
@@ -915,7 +964,10 @@ class MainActivity : AppCompatActivity() {
         options: List<SyncScope.Option>, timeoutS: Int, answer: (SyncScope.Option) -> Unit
     ) {
         dismissScopeChooser()
-        val everything = options.last()
+        val everything = options.first()
+        // A dialog on a finishing Activity throws BadTokenException on the main thread.
+        // Nobody can answer it anyway: take the safe default now.
+        if (isFinishing || isDestroyed) { answer(everything); return }
         val handler = android.os.Handler(mainLooper)
         var left = timeoutS
         fun title() = "${everything.count} new logs - copying all in ${left}s"
@@ -1004,6 +1056,7 @@ class MainActivity : AppCompatActivity() {
             else -> "${o.copied} new logs copied"
         }
         if (o.skipped > 0) parts += "${o.skipped} already had"
+        if (o.skippedOlder > 0) parts += "${o.skippedOlder} older skipped by choice"
         if (o.failed > 0) parts += "${o.failed} FAILED (will retry next sync)"
         if (o.cancelled) parts += "cancelled"
 
@@ -1032,6 +1085,14 @@ class MainActivity : AppCompatActivity() {
         destView.text = destinationUri()?.let { "Saving to: ${prettyDest(it)}" }
             ?: getString(R.string.dest_unset)
         findViewById<Button>(R.id.btnSync).isEnabled = true
+        // Card controls are meaningless - and were dangerous, see send() - mid-sync.
+        val syncing = runningJob != null
+        findViewById<android.view.View>(R.id.btnAdvanced).visibility =
+            if (syncing) android.view.View.GONE else android.view.View.VISIBLE
+        if (syncing) {
+            findViewById<android.view.View>(R.id.advanced).visibility = android.view.View.GONE
+            findViewById<Button>(R.id.btnAdvanced).text = getString(R.string.btn_advanced_show)
+        }
         val state = when {
             runningJob != null -> getString(R.string.status_syncing)
             !link.isOpen -> getString(R.string.status_disconnected)

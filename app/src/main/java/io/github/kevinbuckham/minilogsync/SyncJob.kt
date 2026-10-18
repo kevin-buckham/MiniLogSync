@@ -62,7 +62,8 @@ class SyncJob(
         val skipped: Int,
         val failed: Int,
         val cancelled: Boolean,
-        val restored: Boolean
+        val restored: Boolean,
+        val skippedOlder: Int = 0
     ) {
         val clean: Boolean get() = failed == 0 && !cancelled && restored
     }
@@ -176,7 +177,7 @@ class SyncJob(
                     when (copyOne(card, f, dest, log, index, todo.size, doneBytes, totalBytes,
                                   progress, pending, stamps[f.name] ?: 0L)) {
                         FileResult.COPIED -> doneBytes += f.length
-                        FileResult.SKIPPED -> skipped++
+                        FileResult.SKIPPED -> if (f.name !in skippedByChoice) skipped++
                         FileResult.FAILED -> failed++
                         FileResult.CANCELLED -> {
                             log("Cancelled during ${f.name} - ${pending.size} saved, this one retries next time")
@@ -222,9 +223,11 @@ class SyncJob(
             }
         }
         progress(null)
-        log("Done: $copied new, $skipped already had, $failed failed")
+        val older = skippedByChoice.size
+        log("Done: $copied new, $skipped already had, " +
+            (if (older > 0) "$older older skipped by choice, " else "") + "$failed failed")
 
-        return Outcome(copied, skipped, failed, cancelled.get(), restored)
+        return Outcome(copied, skipped, failed, cancelled.get(), restored, older)
     }
 
     /** A file copied off the card, not yet verified or recorded. */
@@ -313,10 +316,11 @@ class SyncJob(
         chooseScope: (List<SyncScope.Option>) -> SyncScope.Option,
         log: (String) -> Unit
     ): List<me.jahnen.libaums.core.fs.UsbFile> {
-        val now = java.time.LocalDateTime.now()
-        val options = SyncScope.options(todo.associate { it.name to it.length }, now)
+        // Measured from the newest log, never the phone clock - see SyncScope.
+        val ref = SyncScope.reference(todo.map { it.name }) ?: return todo   // none dated
+        val options = SyncScope.options(todo.associate { it.name to it.length }, ref)
         if (options.size < 2) return todo                 // nothing old enough to skip
-        log("${todo.size} new logs - asking how far back to copy")
+        log("${todo.size} new logs, newest dated $ref by the ECU clock - asking how far back")
         alive()
         val choice = chooseScope(options)
         alive()
@@ -325,15 +329,19 @@ class SyncJob(
             log("Copying all ${todo.size} new logs, newest first")
             return todo
         }
-        val (old, keep) = todo.partition { SyncScope.isTooOld(it.name, choice.days, now) }
+        val (old, keep) = todo.partition { SyncScope.isTooOld(it.name, choice.days, ref) }
         // Date-patterned names only (undated logs are never too old), which is what
         // lets a stamp of 0 be recorded safely - see SyncHistory.isCopied.
         old.forEach { history.markCopied(it.name, it.length, 0L) }
+        skippedByChoice += old.map { it.name }
         log("${choice.label}: skipping ${old.size} older log(s), marked as synced " +
             "('Forget sync history' brings them back)")
         old.forEach { log("  skipped ${it.name}") }
         return keep
     }
+
+    /** Logs the owner chose not to copy this run - reported separately, not as "already had". */
+    private val skippedByChoice = HashSet<String>()
 
     private enum class FileResult { COPIED, SKIPPED, FAILED, CANCELLED }
 
