@@ -49,21 +49,73 @@ object IniStore {
             "${p[n - 3]}/${p[n - 2]}/${p[n - 1]}.ini"
     }
 
-    /** Cached, else downloaded. Returns null (having logged why) when neither works. */
-    fun load(ctx: Context, signature: String, log: (String) -> Unit): IniModel? {
+    /** The cached ini for this exact firmware, or null. An unusable cache file is deleted. */
+    fun cached(ctx: Context, signature: String, log: (String) -> Unit): IniModel? {
         val cached = cacheFile(ctx, signature)
-        if (cached.exists()) {
-            val m = parseChecked(cached, signature, log)
-            if (m != null) {
-                log("Using cached ini for this firmware")
-                return m
-            }
-            log("Cached ini is unusable - discarding it and downloading again")
-            cached.delete()
+        if (!cached.exists()) return null
+        val m = parseChecked(cached, signature, log)
+        if (m != null) {
+            log("Using cached ini for this firmware")
+            return m
         }
+        log("Cached ini is unusable - discarding it")
+        cached.delete()
+        return null
+    }
+
+    /**
+     * Read the ini off the ECU's own built-in drive - the only source that always
+     * matches the running build, custom firmware included, and needs no signal.
+     *
+     * The serial link is released for the read and reopened afterwards. No `sdmode`
+     * command is sent: the INI drive is always attached, so the ECU keeps logging.
+     */
+    fun fromEcu(ctx: Context, signature: String, link: EcuLink, log: (String) -> Unit): IniModel? {
+        log("Reading the ini from the ECU's built-in drive (the ECU keeps logging)...")
+        link.releaseForStorage()
+        try {
+            var img: ByteArray? = null
+            for (attempt in 1..3) {
+                img = CardReader(ctx).readIniDrive(log)
+                if (img != null) break
+                Thread.sleep(500L * attempt)
+            }
+            if (img == null) { log("Could not read the ECU's ini drive"); return null }
+            val vol = FatImage.open(img)
+            if (vol == null) { log("The ECU's ini drive is not a FAT12/16 volume"); return null }
+            // Every .ini is tried and only a signature match is accepted, which also
+            // rejects junk such as macOS "._name.ini" AppleDouble files.
+            for (e in vol.entries.filter { it.name.endsWith(".ini", ignoreCase = true) }) {
+                val bytes = vol.read(e) ?: continue
+                val m = runCatching { IniModel.parse(bytes.inputStream().bufferedReader()) }.getOrNull()
+                    ?: continue
+                if (m.signature == signature && m.blockSize > 0) {
+                    cacheFile(ctx, signature).writeBytes(bytes)
+                    log("ini read from the ECU (${e.name}, ${bytes.size / 1024} kB) and cached")
+                    return m
+                }
+            }
+            if (vol.entries.any { it.name.endsWith(".7z", ignoreCase = true) }) {
+                log("The ECU's drive holds rusefi.ini.7z, which this app cannot unpack yet")
+            } else {
+                log("No ini matching this firmware on the ECU's drive")
+            }
+            return null
+        } catch (e: Exception) {
+            log("Reading the ECU's ini drive failed: ${e.javaClass.simpleName}: ${e.message}")
+            return null
+        } finally {
+            val r = link.reopen()
+            if (!link.isOpen) log("WARNING: could not reconnect to the ECU: $r")
+        }
+    }
+
+    /** Download by signature from rusefi.com (official builds only). */
+    fun download(ctx: Context, signature: String, log: (String) -> Unit): IniModel? {
+        val cached = cacheFile(ctx, signature)
         val url = urlFor(signature)
         if (url == null) {
-            log("Signature is not an official rusEFI build - load the .ini by hand (Advanced)")
+            log("This signature is not an official rusEFI build, so rusefi.com has no ini for it")
             return null
         }
         log("Downloading ini: $url")
@@ -76,7 +128,9 @@ object IniStore {
                 instanceFollowRedirects = false   // a redirect off rusefi.com is not the ini
             }
             if (conn.responseCode != 200) {
-                log("ini download failed: HTTP ${conn.responseCode}")
+                log(if (conn.responseCode == 404)
+                        "rusefi.com has no ini for this firmware - is it a custom build?"
+                    else "ini download failed: HTTP ${conn.responseCode}")
                 return null
             }
             conn.inputStream.use { inp ->
@@ -97,7 +151,7 @@ object IniStore {
             log("ini cached (${cached.length() / 1024} kB)")
             m
         } catch (e: Exception) {
-            log("ini download failed: ${e.message} - no signal? Load the .ini by hand (Advanced)")
+            log("ini download failed: ${e.message} - no signal?")
             null
         } finally {
             tmp.delete()
@@ -276,7 +330,17 @@ class LiveLogJob(
         log("Firmware: $signature")
         if (stopFlag.get()) { log("Stopped before logging began"); return }
 
-        val ini = IniStore.load(context, signature, log) ?: return
+        // Cache first; then the ECU's own drive (exact build, no signal needed); then
+        // rusefi.com (official builds only).
+        val ini = IniStore.cached(context, signature, log)
+            ?: IniStore.fromEcu(context, signature, link, log)
+            ?: IniStore.download(context, signature, log)
+        if (ini == null) {
+            log("*** No ini for this firmware. Load the matching .ini with " +
+                "'Load .ini file' on the Live Log tab. ***")
+            return
+        }
+        if (!link.isOpen) { log("Not connected to the ECU - stopping"); return }
         if (stopFlag.get()) { log("Stopped before logging began"); return }
         if (ini.warnings.isNotEmpty()) {
             log("ini: ${ini.warnings.size} channel(s) not understood and left out: " +

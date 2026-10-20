@@ -35,6 +35,9 @@ class CardReader(private val context: Context) {
          * Measured on this ECU: ramdisk 1 MB, card 60905 MB.
          */
         const val MIN_CARD_MB = 100L
+
+        /** Anything larger is not the INI drive (measured: 1088 KB). */
+        const val MAX_INI_DRIVE_BYTES = 16L * 1024 * 1024
     }
 
     private var comm: UsbCommunication? = null
@@ -194,6 +197,64 @@ class CardReader(private val context: Context) {
             log("  LUN $lun: sector 0 unreadable: " +
                 "${e.javaClass.simpleName}: ${e.message ?: "(no message)"}")
         }
+    }
+
+    /**
+     * The ECU's built-in INI drive (normally LUN 0), read whole into memory - about
+     * 1 MB - for FatImage to parse. Read-only, and it needs NO `sdmode` command: this
+     * drive is always attached, so the ECU keeps logging to its SD card throughout.
+     * Only the serial link must be released first (Android will not share the device).
+     *
+     * Returns the first LUN small enough to be the INI drive, or null.
+     */
+    fun readIniDrive(log: (String) -> Unit = {}): ByteArray? {
+        close()
+        val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
+        for (dev in usbManager.deviceList.values) {
+            if (!usbManager.hasPermission(dev)) continue
+            val (iface, inEp, outEp) = findMassStorage(dev) ?: continue
+            val c = try {
+                UsbCommunicationFactory.createUsbCommunication(usbManager, dev, iface, outEp, inEp)
+            } catch (e: Exception) {
+                log("  cannot open mass storage: ${e.javaClass.simpleName}: ${e.message ?: "(no message)"}")
+                continue
+            }
+            try {
+                val maxLunBuf = ByteArray(1)
+                val maxLun = runCatching {
+                    c.controlTransfer(161, 254, 0, iface.id, maxLunBuf, 1)
+                    maxLunBuf[0].toInt() and 0xFF
+                }.getOrDefault(0)
+                for (lun in 0..maxLun) {
+                    try {
+                        val block = BlockDeviceDriverFactory.createBlockDevice(c, lun = lun.toByte())
+                        block.init()
+                        val bs = block.blockSize
+                        val bytes = block.blocks * bs
+                        // The SD card is tens of GB; the INI drive about 1 MB.
+                        if (bytes <= 0 || bytes > MAX_INI_DRIVE_BYTES) continue
+                        log("  LUN $lun: ${bytes / 1024} KB - reading the ini drive")
+                        val img = ByteArray(bytes.toInt())
+                        val perRead = maxOf(1, 16 * 1024 / bs)
+                        var lba = 0L
+                        while (lba < block.blocks) {
+                            val n = minOf(perRead.toLong(), block.blocks - lba).toInt()
+                            val buf = java.nio.ByteBuffer.allocate(n * bs)
+                            block.read(lba, buf)                 // ScsiBlockDevice: offset in BLOCKS
+                            System.arraycopy(buf.array(), 0, img, (lba * bs).toInt(), n * bs)
+                            lba += n
+                        }
+                        return img
+                    } catch (e: Exception) {
+                        // An empty SD slot (no `sdmode pc`) is expected to fail here.
+                        log("  LUN $lun not readable: ${e.javaClass.simpleName}")
+                    }
+                }
+            } finally {
+                runCatching { c.close() }
+            }
+        }
+        return null
     }
 
     private data class Msc(val iface: UsbInterface, val inEp: UsbEndpoint, val outEp: UsbEndpoint)

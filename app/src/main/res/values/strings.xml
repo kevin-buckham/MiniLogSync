@@ -32,11 +32,11 @@
     <string name="tab_live">Live Log</string>
     <string name="live_idle">Not logging</string>
     <string name="live_ecu_unknown">ECU firmware: shown after the first live log</string>
-    <string name="live_hint">Read-only, like TunerStudio: the ECU keeps logging to its own SD card. Nothing is mounted or copied. The first log needs signal to download the ECU\'s .ini; later ones do not.</string>
+    <string name="live_hint">Read-only, like TunerStudio: the ECU keeps logging to its own SD card. Nothing is mounted or copied. The first log for a firmware reads its .ini from the ECU itself (or downloads it); later ones use the saved copy. If that fails, load the .ini by hand.</string>
     <string name="sync_busy_live">Live logging in progress.\nStop it on the Live Log tab to sync logs or use the card controls.</string>
     <string name="live_busy_sync">A sync is running. Live logging is available when it finishes.</string>
     <string name="btn_live_stop">STOP LIVE LOG</string>
     <string name="status_live">Live logging…</string>
-    <string name="btn_load_ini">Load .ini file (custom firmware)</string>
+    <string name="btn_load_ini">Load .ini file by hand</string>
     <string name="progress_preparing">Preparing…</string>
 </resources>

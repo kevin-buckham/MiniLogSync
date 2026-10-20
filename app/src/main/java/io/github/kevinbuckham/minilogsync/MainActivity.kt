@@ -346,7 +346,15 @@ class MainActivity : AppCompatActivity() {
     private var myLiveEcu: ((String) -> Unit)? = null
 
     private val pickIni = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) Thread { IniStore.importManual(applicationContext, uri) { emitLog(it) } }.start()
+        if (uri != null) Thread {
+            val ok = IniStore.importManual(applicationContext, uri) { emitLog(it) }
+            // Said on screen too: the result otherwise lands only on the Messages tab.
+            runOnUiThread {
+                android.widget.Toast.makeText(this,
+                    if (ok) "ini loaded" else "That file was not loaded - see Messages",
+                    android.widget.Toast.LENGTH_LONG).show()
+            }
+        }.start()
     }
 
     private var dlgFile: TextView? = null
@@ -1300,6 +1308,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnLiveRate).text =
             "Rate: " + if (hz == 0) "TunerStudio default" else "$hz Hz"
         findViewById<View>(R.id.btnLiveRate).show(!live && !syncing)
+        findViewById<View>(R.id.btnLoadIni).show(!live && !syncing)
         findViewById<TextView>(R.id.liveDest).text =
             destinationUri()?.let { "Saves to: ${prettyDest(it)}" } ?: getString(R.string.dest_unset)
         val state = when {
